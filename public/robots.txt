@@ -1,0 +1,17 @@
+User-agent: *
+Allow: /
+
+# Sitemap
+Sitemap: https://embeloli.vn/sitemap.xml
+
+# Specific crawl instructions
+User-agent: Googlebot
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+# Block irrelevant paths
+Disallow: /api/
+Disallow: /.git/
+Disallow: /node_modules/
