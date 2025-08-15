@@ -1,6 +1,8 @@
 // ==================== Cấu hình và Imports ====================
 import mineflayer from 'mineflayer';
 import * as pathfinderPlugin from 'mineflayer-pathfinder';
+import { Vec3 } from 'vec3'; // Thêm dòng này để import Vec3
+
 const { pathfinder, Movements, goals } = pathfinderPlugin;
 
 // Type declarations for global
@@ -1344,7 +1346,8 @@ function exploreForOres(oreType: string) {
 function mineStaircase(targetY: number) {
   const position = bot.entity.position;
   const yDirection = targetY > position.y ? 1 : -1;
-  const offset = yDirection > 0 ? bot.vec3(0, 1, 0) : bot.vec3(0, -1, 0);
+  // Sửa lỗi: Thay bot.vec3 bằng new Vec3
+  const offset = yDirection > 0 ? new Vec3(0, 1, 0) : new Vec3(0, -1, 0);
   const goal = new goals.GoalY(targetY);
   bot.pathfinder.setGoal(goal, true);
   bot.pathfinder.on('goal_reached', () => {
@@ -1356,9 +1359,10 @@ function mineHorizontally() {
   const directions = ['forward', 'left', 'right', 'back'] as const;
   const randomDir = directions[Math.floor(Math.random() * directions.length)];
   const position = bot.entity.position;
+  // Sửa lỗi: Thay bot.vec3 bằng new Vec3
   const directionOffsets = {
-    forward: bot.vec3(0, 0, 1), back: bot.vec3(0, 0, -1),
-    left: bot.vec3(-1, 0, 0), right: bot.vec3(1, 0, 0)
+    forward: new Vec3(0, 0, 1), back: new Vec3(0, 0, -1),
+    left: new Vec3(-1, 0, 0), right: new Vec3(1, 0, 0)
   };
   const offset = directionOffsets[randomDir];
   const targetBlock = bot.blockAt(position.offset(offset.x, 0, offset.z));
@@ -1444,7 +1448,8 @@ async function startAutoBuilding(project: string, username: string) {
     }
     await bot.equip(item, 'hand');
     for (const pos of blockData.positions) {
-      await bot.creative.setBlock(bot.vec3(pos.x, pos.y, pos.z), blockData.type);
+      // Sửa lỗi: Thay bot.vec3 bằng new Vec3
+      await bot.creative.setBlock(new Vec3(pos.x, pos.y, pos.z), blockData.type);
     }
   }
   safeChat(`Xây xong ${project} rồi! Đẹp không? (◕‿◕)♡`);
@@ -1718,6 +1723,7 @@ async function generateLoliResponse(message: string, username: string) {
 function exploreRandomDirection() {
   if (!bot || !bot.pathfinder) return;
   try {
+    // Sửa lỗi: Thay bot.vec3 bằng new Vec3
     const randomX = bot.entity.position.x + (Math.random() - 0.5) * 20;
     const randomZ = bot.entity.position.z + (Math.random() - 0.5) * 20;
     const goal = new goals.GoalXZ(randomX, randomZ);
@@ -1787,4 +1793,3 @@ function findNearbyThreats() {
     ['zombie', 'skeleton', 'creeper', 'spider', 'enderman'].includes(entity.name?.toLowerCase() || '')
   );
 }
-
