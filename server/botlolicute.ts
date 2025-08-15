@@ -265,14 +265,12 @@ function setupBotEvents() {
 
   bot.on('death', () => {
     try {
-      droppedItemsLocation = { ...bot.entity.position };
-      safeChat('Nooo! Tôi đã chết! (;´∀`) Sẽ quay lại lụm đồ trong 5 giây!');
-      setTimeout(() => {
-        if (droppedItemsLocation && bot && isConnected) {
-          safeChat('Tôi sẽ quay lại lụm đồ rớt! Wait for me!');
-          returnToDroppedItems();
-        }
-      }, 5000);
+      console.log('💀 Bot đã chết, sẽ respawn nhưng không lụm đồ');
+      safeChat('Nooo! Tôi đã chết! (;´∀`) Nhưng không sao, tôi sẽ tiếp tục cuộc phiêu lưu!');
+      // Loại bỏ việc lụm đồ sau khi chết
+      stopCurrentActivity();
+      currentMode = 'idle';
+      lastActivityTime = Date.now();
     } catch (error) {
       console.log('🔧 Lỗi xử lý death event...');
     }
@@ -831,6 +829,73 @@ function processUserMessage(username: string, message: string) {
       return;
     }
 
+    // Thêm lệnh đi tới vị trí
+    if (lowerMessage.includes('đi tới') || lowerMessage.includes('goto')) {
+      const coordMatch = lowerMessage.match(/(?:đi tới|goto)\s*(?:\s|)(-?\d+)\s*(?:\s|,)\s*(-?\d+)(?:\s*(?:\s|,)\s*(-?\d+))?/i);
+      if (coordMatch) {
+        const x = parseInt(coordMatch[1]);
+        const z = parseInt(coordMatch[2]);
+        const y = coordMatch[3] ? parseInt(coordMatch[3]) : undefined;
+        
+        stopCurrentActivity();
+        currentMode = 'going_to_location';
+        lastActivityTime = Date.now();
+        
+        if (y !== undefined) {
+          safeChat(`${username}-chan! Tôi sẽ đi tới tọa độ (${x}, ${y}, ${z})! ✨`);
+          goToLocation(x, y, z);
+        } else {
+          safeChat(`${username}-chan! Tôi sẽ đi tới tọa độ (${x}, ?, ${z})! Tôi sẽ tìm độ cao phù hợp! ✨`);
+          goToLocationXZ(x, z);
+        }
+      } else {
+        safeChat(`${username}-chan! Hãy nói tọa độ nhé! VD: "đi tới 100 200" hoặc "đi tới 100 70 200"`);
+      }
+      return;
+    }
+
+    // Thêm lệnh tấn công mob
+    if (lowerMessage.includes('đánh') || lowerMessage.includes('tấn công') || lowerMessage.includes('attack')) {
+      const mobMatch = lowerMessage.match(/(?:đánh|tấn công|attack)\s+(\w+)/i);
+      if (mobMatch) {
+        const mobType = mobMatch[1].toLowerCase();
+        stopCurrentActivity();
+        currentMode = 'attacking';
+        lastActivityTime = Date.now();
+        safeChat(`${username}-chan! Tôi sẽ tấn công ${mobType}! (ง •̀_•́)ง`);
+        attackSpecificMob(mobType);
+      } else {
+        safeChat(`${username}-chan! Hãy nói rõ mob nào! VD: "đánh zombie" hoặc "tấn công creeper"`);
+      }
+      return;
+    }
+
+    // Thêm lệnh lụm đồ
+    if (lowerMessage.includes('lụm đồ') || lowerMessage.includes('collect') || lowerMessage.includes('pickup')) {
+      stopCurrentActivity();
+      currentMode = 'collecting';
+      lastActivityTime = Date.now();
+      safeChat(`${username}-chan! Tôi sẽ lụm tất cả đồ xung quanh! 📦`);
+      collectNearbyItems();
+      return;
+    }
+
+    // Thêm lệnh đào block
+    if (lowerMessage.includes('đào') || lowerMessage.includes('dig') || lowerMessage.includes('mine')) {
+      const blockMatch = lowerMessage.match(/(?:đào|dig|mine)\s+(\w+)/i);
+      if (blockMatch) {
+        const blockType = blockMatch[1].toLowerCase();
+        stopCurrentActivity();
+        currentMode = 'digging';
+        lastActivityTime = Date.now();
+        safeChat(`${username}-chan! Tôi sẽ đào ${blockType}! ⛏️`);
+        digSpecificBlock(blockType);
+      } else {
+        safeChat(`${username}-chan! Hãy nói rõ block nào! VD: "đào stone" hoặc "dig dirt"`);
+      }
+      return;
+    }
+
     if (lowerMessage.includes('stop') || lowerMessage.includes('dừng')) {
       stopCurrentActivity();
       lastActivityTime = Date.now();
@@ -1055,6 +1120,214 @@ export function getBotStatus() {
     reconnectAttempts,
     lastUpdate: Date.now()
   };
+}
+
+// ==================== Các function hành động mới ====================
+
+function goToLocation(x: number, y: number, z: number) {
+  if (!bot || !isConnected || !goals) return;
+  
+  try {
+    const goal = new goals.GoalBlock(x, y, z);
+    if (bot.pathfinder) {
+      bot.pathfinder.setGoal(goal, true);
+      console.log(`🚶 Đang di chuyển tới (${x}, ${y}, ${z})`);
+    }
+  } catch (error) {
+    console.log('🔧 Lỗi goToLocation:', error);
+  }
+}
+
+function goToLocationXZ(x: number, z: number) {
+  if (!bot || !isConnected || !goals) return;
+  
+  try {
+    // Tìm độ cao phù hợp tại tọa độ x, z
+    let y = bot.entity.position.y;
+    for (let checkY = Math.floor(y); checkY < y + 10; checkY++) {
+      const blockBelow = bot.blockAt(new (bot as any).Vec3(x, checkY - 1, z));
+      const blockAt = bot.blockAt(new (bot as any).Vec3(x, checkY, z));
+      const blockAbove = bot.blockAt(new (bot as any).Vec3(x, checkY + 1, z));
+      
+      if (blockBelow && blockBelow.name !== 'air' && 
+          blockAt && blockAt.name === 'air' && 
+          blockAbove && blockAbove.name === 'air') {
+        y = checkY;
+        break;
+      }
+    }
+    
+    const goal = new goals.GoalBlock(x, y, z);
+    if (bot.pathfinder) {
+      bot.pathfinder.setGoal(goal, true);
+      console.log(`🚶 Đang di chuyển tới (${x}, ${y}, ${z})`);
+    }
+  } catch (error) {
+    console.log('🔧 Lỗi goToLocationXZ:', error);
+  }
+}
+
+function attackSpecificMob(mobType: string) {
+  if (!bot || !isConnected) return;
+  
+  try {
+    const targetMobs = Object.values(bot.entities).filter((entity: any) => 
+      entity.name && entity.name.toLowerCase().includes(mobType) && 
+      entity.position.distanceTo(bot.entity.position) <= 20
+    );
+    
+    if (targetMobs.length === 0) {
+      safeChat(`Không tìm thấy ${mobType} nào xung quanh! (´;ω;)`);
+      currentMode = 'idle';
+      return;
+    }
+    
+    const target = targetMobs[0] as any;
+    console.log(`⚔️ Tấn công ${mobType} tại ${Math.floor(target.position.x)}, ${Math.floor(target.position.z)}`);
+    
+    if (goals && bot.pathfinder) {
+      const goal = new goals.GoalFollow(target, 1);
+      bot.pathfinder.setGoal(goal, true);
+      
+      const attackInterval = setInterval(() => {
+        if (!bot || !isConnected || currentMode !== 'attacking') {
+          clearInterval(attackInterval);
+          return;
+        }
+        
+        try {
+          if (target.position.distanceTo(bot.entity.position) <= 4) {
+            bot.attack(target);
+          }
+        } catch (err) {
+          clearInterval(attackInterval);
+        }
+      }, 500);
+    }
+  } catch (error) {
+    console.log('🔧 Lỗi attackSpecificMob:', error);
+  }
+}
+
+function collectNearbyItems() {
+  if (!bot || !isConnected) return;
+  
+  try {
+    const items = Object.values(bot.entities).filter((entity: any) => 
+      entity.name === 'item' && 
+      entity.position.distanceTo(bot.entity.position) <= 32
+    );
+    
+    if (items.length === 0) {
+      safeChat('Không có đồ nào xung quanh để lụm! (◕‿◕)');
+      currentMode = 'idle';
+      return;
+    }
+    
+    console.log(`📦 Tìm thấy ${items.length} items, bắt đầu thu thập...`);
+    
+    const collectNext = (index: number) => {
+      if (index >= items.length || currentMode !== 'collecting' || !isConnected) {
+        safeChat('Đã lụm xong tất cả đồ có thể! 💕');
+        currentMode = 'idle';
+        return;
+      }
+      
+      const item = items[index] as any;
+      if (goals && bot.pathfinder) {
+        const goal = new goals.GoalFollow(item, 1);
+        bot.pathfinder.setGoal(goal, true);
+        
+        setTimeout(() => {
+          collectNext(index + 1);
+        }, 3000);
+      }
+    };
+    
+    collectNext(0);
+  } catch (error) {
+    console.log('🔧 Lỗi collectNearbyItems:', error);
+  }
+}
+
+function digSpecificBlock(blockType: string) {
+  if (!bot || !isConnected) return;
+  
+  try {
+    const blocks = findNearbyBlocks(blockType, 16);
+    
+    if (blocks.length === 0) {
+      safeChat(`Không tìm thấy ${blockType} nào xung quanh! (´;ω;)`);
+      currentMode = 'idle';
+      return;
+    }
+    
+    console.log(`⛏️ Tìm thấy ${blocks.length} block ${blockType}, bắt đầu đào...`);
+    
+    const digNext = (index: number) => {
+      if (index >= blocks.length || currentMode !== 'digging' || !isConnected) {
+        safeChat('Đã đào xong tất cả blocks có thể! 💪');
+        currentMode = 'idle';
+        return;
+      }
+      
+      const block = blocks[index];
+      if (goals && bot.pathfinder) {
+        const goal = new goals.GoalBlock(block.position.x, block.position.y, block.position.z);
+        bot.pathfinder.setGoal(goal, true);
+        
+        bot.pathfinder.on('goal_reached', async () => {
+          try {
+            const targetBlock = bot.blockAt(block.position);
+            if (targetBlock && targetBlock.name === blockType) {
+              await bot.dig(targetBlock);
+              console.log(`⛏️ Đã đào ${blockType} tại ${Math.floor(block.position.x)}, ${Math.floor(block.position.y)}, ${Math.floor(block.position.z)}`);
+            }
+            
+            setTimeout(() => {
+              digNext(index + 1);
+            }, 2000);
+          } catch (digError) {
+            console.log('🔧 Lỗi đào block:', digError);
+            setTimeout(() => {
+              digNext(index + 1);
+            }, 2000);
+          }
+        });
+      }
+    };
+    
+    digNext(0);
+  } catch (error) {
+    console.log('🔧 Lỗi digSpecificBlock:', error);
+  }
+}
+
+function findNearbyBlocks(blockType: string, radius: number = 16) {
+  if (!bot) return [];
+  
+  const position = bot.entity.position;
+  const blocks: any[] = [];
+  
+  for (let x = -radius; x <= radius; x++) {
+    for (let y = -radius; y <= radius; y++) {
+      for (let z = -radius; z <= radius; z++) {
+        const checkPos = position.offset(x, y, z);
+        try {
+          const block = bot.blockAt(checkPos);
+          if (block && block.name === blockType) {
+            const distance = position.distanceTo(checkPos);
+            blocks.push({ position: checkPos, distance: distance, type: block.name });
+          }
+        } catch (blockError) { 
+          continue; 
+        }
+      }
+    }
+  }
+  
+  blocks.sort((a, b) => a.distance - b.distance);
+  return blocks;
 }
 
 // FIX: Hệ thống kiểm tra sức khỏe và đói mới
