@@ -1074,6 +1074,88 @@ function startHealthCheck() {
   }, HEALTH_CHECK_DELAY);
 }
 
+// FIX: Hệ thống giám sát idle và tự vệ
+function startIdleMonitoring() {
+  if (selfDefenseInterval) {
+    clearInterval(selfDefenseInterval);
+  }
+  selfDefenseInterval = setInterval(() => {
+    if (!bot || !isConnected) {
+      clearInterval(selfDefenseInterval!);
+      return;
+    }
+    
+    // Check if bot has been idle too long and switch to self-defense mode
+    const timeSinceLastActivity = Date.now() - lastActivityTime;
+    if (timeSinceLastActivity > IDLE_TIMEOUT && currentMode === 'idle') {
+      console.log('🛡️ Bot idle quá lâu, chuyển sang chế độ tự vệ...');
+      startSelfDefense();
+    }
+    
+    // Update bot screen with idle status
+    if (currentMode === 'idle') {
+      botScreenData.status = 'Đang nghỉ ngơi và quan sát...';
+      updateBotScreen();
+    }
+  }, 30000); // Check every 30 seconds
+}
+
+// FIX: Chế độ tự vệ khi idle quá lâu
+function startSelfDefense() {
+  if (currentMode !== 'idle') return;
+  
+  currentMode = 'self_defense';
+  safeChat('Tôi đã nghỉ quá lâu rồi! Giờ sẽ tự vệ và tìm kiếm kẻ thù! (ง •̀_•́)ง');
+  
+  const selfDefenseInterval = setInterval(() => {
+    if (!bot || !isConnected || currentMode !== 'self_defense') {
+      clearInterval(selfDefenseInterval);
+      return;
+    }
+    
+    try {
+      // Look for nearby hostile mobs to attack
+      const nearbyMobs = Object.values(bot.entities).filter((entity: any) => 
+        entity.kind === 'Hostile mobs' && 
+        entity.position.distanceTo(bot.entity.position) < 16
+      );
+      
+      if (nearbyMobs.length > 0) {
+        const target = nearbyMobs[0];
+        bot.attack(target);
+        botScreenData.status = `Đang tấn công ${target.displayName || 'mob'}!`;
+      } else {
+        // Random movement to find mobs
+        const moves = ['forward', 'back', 'left', 'right'] as const;
+        const randomMove = moves[Math.floor(Math.random() * moves.length)];
+        bot.setControlState(randomMove, true);
+        setTimeout(() => {
+          if (bot && currentMode === 'self_defense') {
+            bot.setControlState(randomMove, false);
+          }
+        }, 1000);
+        botScreenData.status = 'Đang tuần tra tìm kẻ thù...';
+      }
+      
+      updateBotScreen();
+      lastActivityTime = Date.now(); // Reset activity timer
+      
+    } catch (error) {
+      console.log('🔧 Lỗi self defense...');
+    }
+  }, 3000);
+  
+  // Return to idle after 5 minutes
+  setTimeout(() => {
+    if (currentMode === 'self_defense') {
+      currentMode = 'idle';
+      safeChat('Đã tự vệ xong! Quay lại nghỉ ngơi! (◕‿◕)');
+      clearInterval(selfDefenseInterval);
+      startRandomMovement();
+    }
+  }, 300000); // 5 minutes
+}
+
 // FIX: Tự động ăn và hồi máu
 async function attemptSelfFeedingAndHealing() {
   const isHungry = bot.food <= 6;
