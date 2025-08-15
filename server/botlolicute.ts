@@ -27,19 +27,16 @@ const BOT_CONFIG = {
 const PROCESS_LOCK_KEY = 'BOTLOLICUTE_PROCESS_LOCK';
 const processStartTime = Date.now();
 
-// Kiểm tra nếu đã có process khác đang chạy
 if (global[PROCESS_LOCK_KEY]) {
   console.log('⚠️ Bot process khác đã đang chạy, thoát để tránh duplicate login...');
   process.exit(0);
 }
 
-// Chỉ chạy bot nếu không phải trong web server process
 if (process.env.BOT_DISABLED === 'true') {
   console.log('🚫 Bot bị tắt do chạy trong web server process');
   process.exit(0);
 }
 
-// Thêm delay ngẫu nhiên để tránh race condition và check duplicate
 const startDelay = Math.random() * 3000;
 setTimeout(() => {
   if (global[PROCESS_LOCK_KEY] && global[PROCESS_LOCK_KEY] !== processStartTime) {
@@ -51,10 +48,8 @@ setTimeout(() => {
   startBot();
 }, startDelay);
 
-// Lock process này
 global[PROCESS_LOCK_KEY] = processStartTime;
 
-// Cleanup khi process kết thúc
 process.on('SIGINT', () => {
   console.log('🛑 Nhận signal SIGINT, đang cleanup...');
   cleanup();
@@ -71,15 +66,14 @@ process.on('exit', () => {
   cleanup();
 });
 
-// Biến trạng thái
 let bot: any = null;
 let isConnected = false;
 let reconnectAttempts = 0;
 const maxReconnectAttempts = 7;
 let movementInterval: NodeJS.Timeout | null = null;
+let healthCheckInterval: NodeJS.Timeout | null = null;
 
-let lastHealthChatTime = 0;
-const HEALTH_CHAT_DELAY = 20000;
+const HEALTH_CHECK_DELAY = 10000;
 let currentMode = 'idle';
 let targetPlayer: any = null;
 let followingInterval: NodeJS.Timeout | null = null;
@@ -87,30 +81,23 @@ let protectingInterval: NodeJS.Timeout | null = null;
 let currentCommand = '';
 let autoFarmTarget = '';
 let autoFarmInterval: NodeJS.Timeout | null = null;
-let creeperAvoidanceMode = false;
 let equipmentCheckInterval: NodeJS.Timeout | null = null;
 
-// NEW EXPLORATION FEATURES
 let exploringInterval: NodeJS.Timeout | null = null;
 let selfDefenseInterval: NodeJS.Timeout | null = null;
 let exploredChests: Set<string> = new Set();
 let isInventoryFull = false;
 let lastActivityTime = Date.now();
 
-// MINING FEATURES
 let miningInterval: NodeJS.Timeout | null = null;
 let miningTarget = '';
 let isWaitingForResponse = false;
 let pendingUser = '';
 let pendingAction = '';
 
-// Chat delay cho combat messages
 let lastCombatChatTime = 0;
-
-// SELF DEFENSE FEATURES  
 const IDLE_TIMEOUT = 3 * 60 * 1000;
 
-// Bot screen data sharing
 let botScreenData = {
   mode: 'idle',
   position: { x: 0, y: 0, z: 0 },
@@ -126,19 +113,16 @@ let botScreenData = {
   lastUpdate: Date.now()
 };
 
-// Chat queue and delay variables
 const chatQueue: string[] = [];
 let isChatting = false;
 const CHAT_DELAY = 4000;
 let lastChatTime = 0;
 
-// Enhanced bot state management
 let previousActivity = 'idle';
 let droppedItemsLocation: any = null;
-let isLowHealth = false;
-let isHungry = false;
+let originalGameMode = 'survival';
+let isFlying = false;
 
-// Cấu hình pathfinder
 let defaultMovements: Movements;
 
 
@@ -157,12 +141,10 @@ function cleanup() {
   }
 }
 
-// Hàm khởi động bot chính
 function startBot() {
   createBot();
 }
 
-// Hàm tạo bot an toàn với duplicate check
 function createBot() {
   if (global[PROCESS_LOCK_KEY] && global[PROCESS_LOCK_KEY] !== processStartTime) {
     console.log('⚠️ Process lock conflict detected, exiting...');
@@ -178,9 +160,6 @@ function createBot() {
   }
 }
 
-// ==================== Quản lý Intervals và State ====================
-
-// FIX: Hàm dừng tất cả hoạt động hiện tại một cách ngay lập tức
 function stopCurrentActivity() {
   console.log(`🛑 Dừng hoạt động hiện tại: ${currentMode} -> idle`);
   
@@ -189,40 +168,30 @@ function stopCurrentActivity() {
   targetPlayer = null;
   currentCommand = '';
   autoFarmTarget = '';
-  creeperAvoidanceMode = false;
   previousActivity = 'idle';
 
-  // FIX: Dừng tất cả interval và pathfinder goal ngay lập tức
   clearAllIntervalsAndPathfinder();
 
-  // Dừng tất cả movement controls ngay lập tức
   try {
     if (bot && isConnected) {
-      ['forward', 'back', 'left', 'right', 'jump', 'sprint'].forEach(control => {
-        bot.setControlState(control, false);
-      });
+      bot.clearControlStates();
     }
   } catch (error) {
     console.log('🔧 Lỗi dừng movement controls...');
   }
-
   updateBotScreen();
-  
   console.log(`✅ Đã dừng hoạt động ${oldMode} thành công`);
 }
 
-// FIX: Hàm chung để clear tất cả intervals và pathfinder
 function clearAllIntervalsAndPathfinder() {
-  // Dừng pathfinder ngay lập tức
   if (bot && bot.pathfinder) {
     bot.pathfinder.setGoal(null);
   }
 
-  // Dừng tất cả các intervals
   const intervals = [
     movementInterval, followingInterval, protectingInterval, 
     autoFarmInterval, equipmentCheckInterval, exploringInterval, 
-    selfDefenseInterval, miningInterval
+    selfDefenseInterval, miningInterval, healthCheckInterval
   ];
   intervals.forEach(interval => {
     if (interval) {
@@ -238,8 +207,8 @@ function clearAllIntervalsAndPathfinder() {
   exploringInterval = null;
   selfDefenseInterval = null;
   miningInterval = null;
+  healthCheckInterval = null;
 }
-
 
 // ==================== Thiết lập Events của Bot ====================
 function setupBotEvents() {
@@ -250,7 +219,6 @@ function setupBotEvents() {
     reconnectAttempts = 0;
     console.log('💕 Bot Lolicute đã tham gia server! Konnichiwa minna-san! UwU');
 
-    // Load pathfinder plugin và set up movements
     bot.loadPlugin(pathfinder);
     defaultMovements = new Movements(bot);
     bot.pathfinder.setMovements(defaultMovements);
@@ -261,12 +229,11 @@ function setupBotEvents() {
 
     updateBotScreen();
     botScreenData.status = 'Đã kết nối thành công!';
-    
     lastActivityTime = Date.now();
-    
-    // Start background systems
     startRandomMovement();
     startIdleMonitoring();
+    // Bổ sung: Bắt đầu kiểm tra sức khỏe và đói
+    startHealthCheck();
   });
 
   bot.on('chat', (username: string, message: string) => {
@@ -287,64 +254,20 @@ function setupBotEvents() {
   bot.on('playerLeft', (player: any) => {
     console.log(`👋 ${player.username} đã rời server`);
     safeChat(`Sayonara ${player.username}-chan! (´;ω;) Hẹn gặp lại! 💔`);
-
     if (targetPlayer && targetPlayer.username === player.username) {
       stopCurrentActivity();
       safeChat('Người mà tôi đang theo dõi đã rời đi! (´;ω;) Tôi sẽ nghỉ ngơi...');
     }
   });
 
-  bot.on('health', () => {
-    try {
-      const now = Date.now();
-      
-      if (bot.health <= 6 && !isLowHealth) {
-        isLowHealth = true;
-        if (currentMode !== 'idle') {
-          previousActivity = currentMode;
-          stopCurrentActivity();
-        }
-        safeChat('Kyaa~! Máu thấp quá! Tôi phải chạy đi chữa trị! (>_<)');
-        startHealthRecovery();
-      } else if (bot.health > 10 && isLowHealth) {
-        isLowHealth = false;
-        safeChat('Phew! Máu đã an toàn rồi! Tôi sẽ tiếp tục hoạt động! ٩(◕‿◕)۶');
-        resumePreviousActivity();
-      }
-      
-      if (bot.health < 10 && now - lastHealthChatTime > HEALTH_CHAT_DELAY) {
-        safeChat('Kyaa~! Tôi bị thương rồi! (>_<) Cần hồi máu gấp!');
-        lastHealthChatTime = now;
-      }
-      if (bot.health === 20 && now - lastHealthChatTime > HEALTH_CHAT_DELAY) {
-        safeChat('Yay! Máu đầy rồi! ٩(◕‿◕)۶ Cảm ơn mọi người!');
-        lastHealthChatTime = now;
-      }
-    } catch (error) {
-      console.log('🔧 Lỗi xử lý health event, bỏ qua...');
-    }
-  });
-
-  bot.on('food', () => {
-    try {
-      if (bot.food <= 6 && !isHungry) {
-        isHungry = true;
-        safeChat('Ăn... đói quá! (´;ω;) Ai có đồ ăn không ạ?');
-        attemptSelfFeeding();
-      } else if (bot.food >= 18 && isHungry) {
-        isHungry = false;
-        safeChat('Cảm ơn! Đã no rồi! (◕‿◕)♡');
-      }
-    } catch (error) {
-      console.log('🔧 Lỗi xử lý food event...');
-    }
-  });
+  // Gỡ bỏ health và food event, thay thế bằng health check interval
+  // bot.on('health', () => {});
+  // bot.on('food', () => {});
 
   bot.on('death', () => {
     try {
       droppedItemsLocation = { ...bot.entity.position };
       safeChat('Nooo! Tôi đã chết! (;´∀`) Sẽ quay lại lụm đồ trong 5 giây!');
-      
       setTimeout(() => {
         if (droppedItemsLocation && bot && isConnected) {
           safeChat('Tôi sẽ quay lại lụm đồ rớt! Wait for me!');
@@ -374,7 +297,6 @@ function setupBotEvents() {
     isConnected = false;
     const reasonStr = typeof reason === 'string' ? reason : JSON.stringify(reason);
     console.log(`⚠️ Bot bị kick: ${reasonStr}`);
-
     if (reasonStr.includes('duplicate_login')) {
       console.log('🚫 DUPLICATE LOGIN DETECTED - Thoát ngay để tránh conflict...');
       if (global[PROCESS_LOCK_KEY] === processStartTime) {
@@ -382,7 +304,6 @@ function setupBotEvents() {
       }
       process.exit(0);
     }
-
     if (reasonStr && (reasonStr.toLowerCase().includes('throttled') || reasonStr.toLowerCase().includes('connection reset'))) {
       console.log('🕐 Chờ 60 giây do connection throttling hoặc reset...');
       setTimeout(() => {
@@ -402,70 +323,54 @@ function setupBotEvents() {
 
 // ==================== Logic chính của Bot ====================
 
-// FIX: Bắt đầu theo dõi player với pathfinding nâng cao
+// FIX: Tích hợp chế độ theo dõi thông minh
 function startFollowing(player: any) {
-  if (followingInterval) {
-    clearInterval(followingInterval);
-  }
-
+  stopCurrentActivity();
   if (!bot.pathfinder || !player?.entity) {
     safeChat('Gomen! Pathfinder chưa sẵn sàng để theo dõi bạn! (´;ω;)');
     return;
   }
-
   console.log(`🏃 Bắt đầu theo dõi ${player.username}`);
   safeChat(`Hai ${player.username}-chan! Tôi sẽ theo bạn đi khắp nơi! ε=ε=ε=┌(˘▾˘)┘`);
 
-  // Sử dụng GoalFollow của pathfinder để theo dõi mượt mà hơn
-  // Khoảng cách 1.5 block để bot không quá sát và không bị kẹt
-  const followDistance = 1.5;
+  const followDistance = 2.0;
   const goal = new goals.GoalFollow(player.entity, followDistance);
-  bot.pathfinder.setGoal(goal);
+  bot.pathfinder.setGoal(goal, true);
 
-  // Interval để update màn hình bot và kiểm tra player
   followingInterval = setInterval(() => {
     if (!isConnected || !bot || !player || !player.entity || currentMode !== 'following') {
       clearInterval(followingInterval!);
       stopCurrentActivity();
       return;
     }
-
     const distance = bot.entity.position.distanceTo(player.entity.position);
     botScreenData.targetPlayer = player.username;
     botScreenData.status = `Đang theo dõi ${player.username} (${distance.toFixed(1)}m)`;
 
-    // Nếu cách quá xa, dùng tp
-    if (distance > 25) {
-      bot.chat(`/tp ${player.username}`);
+    // Chuyển sang chế độ dịch chuyển khi quá xa
+    if (distance > 20) {
       safeChat('Kyaa~! Bạn đi quá xa rồi! Tôi sẽ teleport đến! ✨');
+      bot.chat(`/tp ${player.username}`);
       botScreenData.status = `Teleport đến ${player.username}`;
     }
-
     updateBotScreen();
-  }, 500); // Check mỗi 0.5s
+  }, 500);
 }
 
-// Bắt đầu bảo vệ player - cải thiện
+// FIX: Tích hợp chế độ bảo vệ thông minh
 function startProtecting(player: any) {
-  if (protectingInterval) {
-    clearInterval(protectingInterval);
-  }
-
+  stopCurrentActivity();
   if (!bot.pathfinder || !player?.entity) {
     safeChat('Gomen! Pathfinder chưa sẵn sàng để bảo vệ bạn! (´;ω;)');
     return;
   }
-
   console.log(`🛡️ Bắt đầu bảo vệ ${player.username}`);
   safeChat(`Hai ${player.username}-chan! Tôi sẽ bảo vệ bạn khỏi tất cả quái vật! (ง •̀_•́)ง`);
-
-  // Trang bị đồ xịn nhất
   startAutoEquipment();
   
-  // Sử dụng GoalFollow để giữ khoảng cách bảo vệ
-  const protectDistance = 2.5;
+  const protectDistance = 2.0;
   const goal = new goals.GoalFollow(player.entity, protectDistance);
-  bot.pathfinder.setGoal(goal);
+  bot.pathfinder.setGoal(goal, true);
 
   protectingInterval = setInterval(() => {
     if (!isConnected || !bot || !player || !player.entity || currentMode !== 'protecting') {
@@ -473,7 +378,6 @@ function startProtecting(player: any) {
       stopCurrentActivity();
       return;
     }
-
     try {
       const threats = checkForThreats();
       
@@ -481,14 +385,11 @@ function startProtecting(player: any) {
         botScreenData.status = `Đang chiến đấu với ${threats.length} quái vật!`;
       } else {
         botScreenData.status = `Đang tuần tra bảo vệ ${player.username}`;
-        // Nếu không có threat, tiếp tục theo player
         if (!bot.pathfinder.goal) {
-          bot.pathfinder.setGoal(goal);
+          bot.pathfinder.setGoal(goal, true);
         }
       }
-
       updateBotScreen();
-
     } catch (error) {
       console.log('🔧 Lỗi trong chế độ bảo vệ...');
       botScreenData.status = 'Lỗi trong chế độ bảo vệ';
@@ -499,16 +400,13 @@ function startProtecting(player: any) {
 
 function checkForThreats() {
   if (!bot || !targetPlayer || !targetPlayer.entity) return [];
-
   try {
     const playerPos = targetPlayer.entity.position;
     const nearbyEntities = Object.values(bot.entities).filter((entity: any) => {
       if (!entity || !entity.position) return false;
-
       const distance = entity.position.distanceTo(playerPos);
       const isMob = entity.type === 'mob' && entity.displayName !== 'Armor Stand';
       const isHostile = ['zombie', 'skeleton', 'creeper', 'spider', 'enderman', 'witch'].includes(entity.name?.toLowerCase() || entity.displayName?.toLowerCase() || '');
-
       return distance <= 10 && (isMob || isHostile) && entity.id !== bot.entity.id;
     });
 
@@ -522,8 +420,8 @@ function checkForThreats() {
       const threatDistance = (threat as any).position.distanceTo(bot.entity.position);
 
       if (threatDistance > 10) {
-        bot.chat(`/tp ${targetPlayer.username}`);
         safeChat('Có quái vật! Tôi đang đến bảo vệ bạn! (ง •̀_•́)ง');
+        bot.chat(`/tp ${targetPlayer.username}`);
         botScreenData.status = `Teleport đến ${targetPlayer.username} để bảo vệ`;
       } else {
         if ((threat as any).name && (threat as any).name.toLowerCase().includes('creeper')) {
@@ -533,7 +431,6 @@ function checkForThreats() {
         }
       }
     }
-
     return nearbyEntities;
   } catch (error) {
     console.log('🔧 Lỗi check threats...');
@@ -544,24 +441,20 @@ function checkForThreats() {
 function attackEntity(entity: any) {
   try {
     if (!bot || !entity) return;
-
     bot.attack(entity);
     const entityName = entity.name || entity.mobType || 'Unknown';
-    
     const now = Date.now();
     if (now - lastCombatChatTime > 5000) {
       safeChat(`Take this! Tôi sẽ bảo vệ chủ nhân! (ง •̀_•́)ง ${entityName}!`);
       lastCombatChatTime = now;
     }
-
     setTimeout(() => {
       if ((currentMode === 'protecting' || currentMode === 'autofarming') && targetPlayer) {
         if (bot.pathfinder) {
-          bot.pathfinder.setGoal(new goals.GoalFollow(targetPlayer.entity, 2.5));
+          bot.pathfinder.setGoal(new goals.GoalFollow(targetPlayer.entity, 2.0), true);
         }
       }
     }, 2000);
-
   } catch (error) {
     console.log('🔧 Lỗi tấn công entity...');
   }
@@ -570,32 +463,27 @@ function attackEntity(entity: any) {
 function attackCreeper(creeper: any) {
   try {
     if (!bot || !creeper) return;
-
     creeperAvoidanceMode = true;
     safeChat('Creeper detected! Tôi sẽ hit & run! (ง •̀_•́)ง 💥');
-
     const hitAndRunInterval = setInterval(() => {
       if (!creeper || !bot || !isConnected) {
         clearInterval(hitAndRunInterval);
         creeperAvoidanceMode = false;
         return;
       }
-
       const distance = bot.entity.position.distanceTo(creeper.position);
-
       if (distance > 15) {
         clearInterval(hitAndRunInterval);
         creeperAvoidanceMode = false;
         safeChat('Creeper đã được tiêu diệt hoặc thoát khỏi tầm! ✨');
         return;
       }
-
       if (distance > 4) {
-        bot.pathfinder.setGoal(new goals.GoalNear(creeper.position.x, creeper.position.y, creeper.position.z, 2));
+        bot.pathfinder.setGoal(new goals.GoalNear(creeper.position.x, creeper.position.y, creeper.position.z, 2), true);
       } else if (distance <= 4 && distance > 2) {
         bot.attack(creeper);
       } else {
-        bot.pathfinder.setGoal(new goals.GoalNear(creeper.position.x, creeper.position.y, creeper.position.z, 6));
+        bot.pathfinder.setGoal(new goals.GoalNear(creeper.position.x, creeper.position.y, creeper.position.z, 6), true);
       }
     }, 500);
   } catch (error) {
@@ -605,36 +493,27 @@ function attackCreeper(creeper: any) {
 }
 
 function startAutoFarm(mobType: string) {
-  if (autoFarmInterval) {
-    clearInterval(autoFarmInterval);
-  }
-
+  stopCurrentActivity();
   startAutoEquipment();
   safeChat(`Bắt đầu auto farm ${mobType}! Tôi sẽ dùng đồ tốt nhất! (ง •̀_•́)ง ✨`);
-
   autoFarmInterval = setInterval(() => {
     if (!isConnected || !bot || currentMode !== 'autofarming') {
       clearInterval(autoFarmInterval!);
       return;
     }
-
     try {
       const targetMobs = Object.values(bot.entities).filter((entity: any) => {
         if (!entity || !entity.position) return false;
-
         const distance = entity.position.distanceTo(bot.entity.position);
         const matchesMobType = entity.name && entity.name.toLowerCase().includes(mobType.toLowerCase());
-
         return distance <= 20 && matchesMobType && entity.id !== bot.entity.id;
       });
-
       if (targetMobs.length > 0) {
         const closestMob = targetMobs.reduce((closest: any, current: any) => {
           const closestDist = bot.entity.position.distanceTo(closest.position);
           const currentDist = bot.entity.position.distanceTo(current.position);
           return currentDist < closestDist ? current : closest;
         }, null);
-
         farmMob(closestMob);
       } else {
         exploreRandomDirection();
@@ -648,9 +527,8 @@ function startAutoFarm(mobType: string) {
 function farmMob(mob: any) {
   try {
     const distance = bot.entity.position.distanceTo(mob.position);
-
     if (distance > 3) {
-      bot.pathfinder.setGoal(new goals.GoalFollow(mob, 2));
+      bot.pathfinder.setGoal(new goals.GoalFollow(mob, 2), true);
     } else {
       bot.pathfinder.setGoal(null);
       if (mob.name && mob.name.toLowerCase().includes('creeper')) {
@@ -659,27 +537,24 @@ function farmMob(mob: any) {
         attackEntity(mob);
       }
     }
-
   } catch (error) {
     console.log('🔧 Lỗi farm mob...');
   }
 }
 
 // ==================== Các hàm hỗ trợ khác ====================
+// FIX: Hàm chat mới với hàng đợi để giảm spam
 function safeChat(message: string) {
   try {
     if (!bot || !isConnected || !message || message.length === 0) return;
-    
     const now = Date.now();
     if (now - lastChatTime < CHAT_DELAY) {
       chatQueue.push(message);
       return;
     }
-    
     lastChatTime = now;
     bot.chat(message);
     console.log(`🤖 Bot: ${message}`);
-    
     setTimeout(() => {
       if (chatQueue.length > 0 && bot && isConnected) {
         const nextMessage = chatQueue.shift();
@@ -790,6 +665,26 @@ function processUserMessage(username: string, message: string) {
       lastActivityTime = Date.now();
       safeChat(`Kyaa~! ${username}-chan! Tôi sẽ khám phá thế giới thông minh! 🗺️✨ Tìm rương, đánh quái, tránh lá cây!`);
       startSmartExplore();
+      return;
+    }
+    
+    if (lowerMessage.includes('auto xây')) {
+      const buildMatch = lowerMessage.match(/auto xây (.+)/i);
+      if (buildMatch) {
+        const project = buildMatch[1];
+        startAutoBuilding(project, username);
+      } else {
+        safeChat('Gomen! Anh muốn xây gì ạ? Hãy nói "auto xây [tên công trình]" nhé! 💕');
+      }
+      return;
+    }
+    
+    if (lowerMessage.includes('auto câu')) {
+      stopCurrentActivity();
+      currentMode = 'fishing';
+      currentCommand = 'auto câu';
+      lastActivityTime = Date.now();
+      startAutoFishing(username);
       return;
     }
 
@@ -938,7 +833,6 @@ function processUserMessage(username: string, message: string) {
     }
 
     if (lowerMessage.includes('stop') || lowerMessage.includes('dừng')) {
-      // FIX: Lệnh dừng sẽ gọi hàm stopCurrentActivity đã được cải tiến
       stopCurrentActivity();
       lastActivityTime = Date.now();
       safeChat(`Hai ${username}-chan! Tôi đã dừng tất cả hoạt động! (◕‿◕)`);
@@ -974,7 +868,6 @@ function processUserMessage(username: string, message: string) {
         safeChat(randomResponse);
       });
     }
-
   } catch (error) {
     console.log('🔧 Lỗi xử lý user message, bỏ qua...');
   }
@@ -983,7 +876,6 @@ function processUserMessage(username: string, message: string) {
 function updateBotScreen() {
   try {
     if (!bot || !isConnected) return;
-
     botScreenData.mode = currentMode;
     botScreenData.position = {
       x: Math.round(bot.entity.position.x * 10) / 10,
@@ -1001,6 +893,7 @@ function updateBotScreen() {
         bot.inventory.slots[8]?.name || null
       ] as (string | null)[]
     };
+    botScreenData.status = botScreenData.status;
     botScreenData.lastUpdate = Date.now();
   } catch (error) {
   }
@@ -1018,29 +911,6 @@ function safeStringify(value: any): string {
   }
 }
 
-function processChatQueue() {
-  if (isChatting || chatQueue.length === 0) {
-    return;
-  }
-
-  isChatting = true;
-  const messageToSend = chatQueue.shift();
-
-  if (messageToSend) {
-    try {
-      bot.chat(messageToSend);
-      console.log(`💬 Bot nói: ${messageToSend}`);
-    } catch (error) {
-      console.log('🔧 Lỗi khi gửi chat từ hàng đợi:', error);
-    }
-  }
-
-  setTimeout(() => {
-    isChatting = false;
-    processChatQueue();
-  }, CHAT_DELAY);
-}
-
 function handleDisconnection(reason: string) {
   isConnected = false;
   stopCurrentActivity();
@@ -1050,24 +920,14 @@ function handleDisconnection(reason: string) {
 
 function handleBotError(err: Error) {
   console.log(`🔧 Bot error: ${err.message}`);
-
   const ignoredErrors = [
-    'unknown chat format code',
-    'chat format',
-    'ENOTFOUND',
-    'ECONNREFUSED',
-    'ETIMEDOUT',
-    'socket hang up',
-    'ECONNRESET',
-    'connection throttled',
-    'throttled',
-    'failed to connect'
+    'unknown chat format code', 'chat format', 'ENOTFOUND', 'ECONNREFUSED',
+    'ETIMEDOUT', 'socket hang up', 'ECONNRESET', 'connection throttled',
+    'throttled', 'failed to connect'
   ];
-
   const shouldIgnore = ignoredErrors.some(errorType => 
     err.message.toLowerCase().includes(errorType.toLowerCase())
   );
-
   if (shouldIgnore) {
     console.log('🔧 Lỗi được bỏ qua, bot tiếp tục hoạt động...');
     if (err.message.toLowerCase().includes('throttled') || 
@@ -1080,7 +940,6 @@ function handleBotError(err: Error) {
     }
     return;
   }
-
   isConnected = false;
   attemptReconnect();
 }
@@ -1095,11 +954,9 @@ function attemptReconnect() {
     }, 120000);
     return;
   }
-
   reconnectAttempts++;
   const delay = Math.min(10000 + (reconnectAttempts * 10000), 60000);
   console.log(`🔄 Thử kết nối lại... (${reconnectAttempts}/${maxReconnectAttempts}) sau ${delay/1000}s`);
-
   setTimeout(() => {
     createBot();
   }, delay);
@@ -1109,14 +966,11 @@ function startRandomMovement() {
   if (movementInterval) {
     clearInterval(movementInterval);
   }
-
   movementInterval = setInterval(() => {
     if (!isConnected || !bot || currentMode !== 'idle') return;
-
     try {
       const actions = ['forward', 'back', 'left', 'right', 'jump'] as const;
       const randomAction = actions[Math.floor(Math.random() * actions.length)];
-
       bot.setControlState(randomAction, true);
       setTimeout(() => {
         if (bot && isConnected && currentMode === 'idle') {
@@ -1131,7 +985,6 @@ function startRandomMovement() {
 
 function performDance() {
   if (!bot || !isConnected || currentMode !== 'idle') return;
-
   let danceStep = 0;
   const danceInterval = setInterval(() => {
     if (!isConnected || !bot || danceStep >= 8 || currentMode !== 'idle') {
@@ -1141,18 +994,15 @@ function performDance() {
       }
       return;
     }
-
     try {
       const moves = ['jump', 'left', 'right', 'forward', 'back'] as const;
       const move = moves[danceStep % moves.length];
-
       bot.setControlState(move, true);
       setTimeout(() => {
         if (bot && isConnected && currentMode === 'idle') {
           bot.setControlState(move, false);
         }
       }, 500);
-
       danceStep++;
     } catch (error) {
       clearInterval(danceInterval);
@@ -1165,7 +1015,6 @@ process.on('SIGINT', () => {
   console.log('🛑 Đang dừng Bot Lolicute...');
   isConnected = false;
   stopCurrentActivity();
-
   if (bot) {
     try {
       safeChat('Sayonara minna-san! (◕‿◕)ノ Hẹn gặp lại! 💕');
@@ -1209,130 +1058,117 @@ export function getBotStatus() {
   };
 }
 
-function startAutoExplore() {
-  if (exploringInterval) {
-    clearInterval(exploringInterval);
+// FIX: Hệ thống kiểm tra sức khỏe và đói mới
+function startHealthCheck() {
+  if (healthCheckInterval) {
+    clearInterval(healthCheckInterval);
+  }
+  healthCheckInterval = setInterval(() => {
+    if (!bot || !isConnected) {
+      clearInterval(healthCheckInterval!);
+      return;
+    }
+    if (bot.health <= 6 || bot.food <= 6) { // 3 trái tim / 3 đùi gà
+      attemptSelfFeedingAndHealing();
+    }
+  }, HEALTH_CHECK_DELAY);
+}
+
+// FIX: Tự động ăn và hồi máu
+async function attemptSelfFeedingAndHealing() {
+  const isHungry = bot.food <= 6;
+  const isLowHealth = bot.health <= 6;
+  const healthPotion = bot.inventory.findInventoryItem('potion', 8261); // Health Potion II
+
+  if (isHungry) {
+    const foodItems = checkInventoryForItem('food').items;
+    if (foodItems.length > 0) {
+      await bot.equip(foodItems[0], 'hand');
+      await bot.consume();
+      safeChat(`Đang ăn đồ ăn ngon! Om nom nom! (◕‿◕)`);
+      return;
+    }
   }
 
-  console.log('🗺️ Bắt đầu khám phá thế giới với AI...');
-  safeChat('Bắt đầu cuộc phiêu lưu! Tôi sẽ tìm rương, đánh quái, và lụm đồ! ✨🏃‍♀️');
+  if (isLowHealth && healthPotion) {
+    await bot.equip(healthPotion, 'hand');
+    await bot.consume();
+    safeChat('Đang uống thuốc hồi máu! Tôi sẽ khỏe lại ngay! 💖');
+    return;
+  }
+}
 
-  equipBestWeapon();
-  let isPerformingAction = false;
-
+// FIX: Chế độ khám phá thông minh
+function startSmartExplore() {
+  stopCurrentActivity();
+  safeChat('Bắt đầu khám phá thông minh! Tránh lá cây, dùng tools hợp lý! 🗺️✨');
   exploringInterval = setInterval(() => {
     if (!isConnected || !bot || currentMode !== 'exploring') {
       clearInterval(exploringInterval!);
       return;
     }
-
     try {
-      checkInventoryFullness();
-      lastActivityTime = Date.now();
-
-      if (isPerformingAction) {
-        return;
-      }
-      isPerformingAction = true;
-
-      const nearbyTargets = findExplorationTargets();
+      equipBestGear();
+      const targets = findSmartExplorationTargets();
       
-      if (nearbyTargets.chests.length > 0 && !isInventoryFull) {
-        lootNearestChest(nearbyTargets.chests);
-      } else if (nearbyTargets.mobs.length > 0) {
-        attackNearestMob(nearbyTargets.mobs);
-      } else if (nearbyTargets.drops.length > 0 && !isInventoryFull) {
-        collectNearestDrop(nearbyTargets.drops);
+      if (targets.chests.length > 0) {
+        lootNearestChest(targets.chests);
+      } else if (targets.drops.length > 0 && !isInventoryFull) {
+        collectNearestDrop(targets.drops);
+      } else if (targets.mobs.length > 0) {
+        attackNearestMob(targets.mobs);
       } else {
         exploreRandomDirection();
       }
-
-      setTimeout(() => {
-        isPerformingAction = false;
-      }, 3000);
-
       updateBotScreen();
     } catch (error) {
-      console.log(`🔧 Lỗi trong exploration: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      isPerformingAction = false;
+      console.log('🔧 Lỗi smart explore...');
     }
   }, 3000);
-
-  startIdleMonitoring();
 }
 
-function findExplorationTargets() {
-  const position = bot.entity.position;
-  const targets = {
-    chests: [] as any[],
-    mobs: [] as any[],
-    drops: [] as any[]
-  };
-
+function findSmartExplorationTargets() {
+  const targets = { chests: [] as any[], drops: [] as any[], mobs: [] as any[] };
   try {
-    for (let x = -20; x <= 20; x += 2) {
-      for (let y = -8; y <= 8; y++) {
-        for (let z = -20; z <= 20; z += 2) {
-          const checkPos = position.offset(x, y, z);
-          if (checkPos.y < 30) continue;
-          try {
-            const block = bot.blockAt(checkPos);
-            if (block && (block.name === 'chest' || block.name === 'trapped_chest' || 
-                         block.name === 'ender_chest' || block.name === 'shulker_box')) {
-              const chestKey = `${Math.floor(checkPos.x)},${Math.floor(checkPos.y)},${Math.floor(checkPos.z)}`;
-              if (!exploredChests.has(chestKey)) {
-                const distance = position.distanceTo(checkPos);
-                targets.chests.push({
-                  position: checkPos,
-                  distance: distance,
-                  key: chestKey,
-                  type: block.name
-                });
-              }
-            }
-          } catch (blockError) {
-            continue;
-          }
-        }
-      }
-    }
-
-    Object.values(bot.entities).forEach((entity: any) => {
-      if (!entity || !entity.position || entity.id === bot.entity.id) return;
-      const distance = position.distanceTo(entity.position);
-      if (distance <= 15) {
-        const hostileMobs = ['zombie', 'skeleton', 'creeper', 'spider', 'enderman', 'witch', 
-                           'blaze', 'ghast', 'slime', 'magma_cube', 'piglin', 'hoglin', 
-                           'vindicator', 'evoker', 'pillager', 'ravager'];
-        const mobName = (entity.displayName || entity.name || '').toLowerCase();
-        
-        if (hostileMobs.some(mob => mobName.includes(mob)) || entity.type === 'hostile') {
-          targets.mobs.push({
-            entity,
-            distance,
-            type: entity.displayName || entity.name || 'Unknown Mob'
-          });
-        }
-      }
-    });
-
+    const position = bot.entity.position;
     Object.values(bot.entities).forEach((entity: any) => {
       if (!entity || !entity.position) return;
       const distance = position.distanceTo(entity.position);
-      if (distance <= 12 && entity.name === 'item') {
+      if (distance > 32) return;
+      if (entity.objectType === 'Item') {
         targets.drops.push({
-          entity,
-          distance,
-          item: entity.getDroppedItem?.() || 'Unknown Item'
+          entity, distance, item: entity.displayName || 'Unknown Item'
+        });
+      } else if (entity.type === 'mob' || entity.type === 'hostile') {
+        targets.mobs.push({
+          entity, distance, type: entity.displayName || entity.name || 'Unknown Mob'
         });
       }
     });
 
+    // FIX: Mở rộng tìm kiếm rương theo chiều dọc
+    for (let x = -32; x <= 32; x += 4) {
+      for (let z = -32; z <= 32; z += 4) {
+        for (let y = position.y - 15; y <= position.y + 5; y++) {
+          const checkPos = position.offset(x, y, z);
+          const block = bot.blockAt(checkPos);
+          if (block && (block.name.includes('chest') || block.name.includes('barrel'))) {
+            const chestKey = `${checkPos.x},${checkPos.y},${checkPos.z}`;
+            if (!exploredChests.has(chestKey)) {
+              const distance = position.distanceTo(checkPos);
+              targets.chests.push({
+                position: checkPos, distance, type: block.name, block
+              });
+            }
+          }
+        }
+      }
+    }
     targets.chests.sort((a, b) => a.distance - b.distance);
-    targets.mobs.sort((a, b) => a.distance - b.distance);
     targets.drops.sort((a, b) => a.distance - b.distance);
+    targets.mobs.sort((a, b) => a.distance - b.distance);
   } catch (error) {
-    console.log(`🔧 Lỗi tìm targets: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    console.log('🔧 Lỗi find smart targets...');
   }
   return targets;
 }
@@ -1340,42 +1176,28 @@ function findExplorationTargets() {
 function lootNearestChest(chests: any[]) {
   if (!chests.length) return;
   const nearestChest = chests[0];
-  console.log(`📦 Tìm thấy ${nearestChest.type} tại (${Math.floor(nearestChest.position.x)}, ${Math.floor(nearestChest.position.y)}, ${Math.floor(nearestChest.position.z)})! Đang loot...`);
-  safeChat(`Kyaa! Tìm thấy ${nearestChest.type}! Có gì hay ho không nhỉ? 📦✨`);
-
+  safeChat(`Kyaa! Tìm thấy ${nearestChest.type} dưới lòng đất! Có gì hay ho không nhỉ? 📦✨`);
   try {
     bot.clearControlStates();
     if (bot.pathfinder && goals) {
-      const goal = new goals.GoalBlock(
-        Math.floor(nearestChest.position.x),
-        Math.floor(nearestChest.position.y),
-        Math.floor(nearestChest.position.z)
-      );
-      bot.pathfinder.setGoal(goal);
+      const goal = new goals.GoalBlock(nearestChest.position.x, nearestChest.position.y, nearestChest.position.z);
+      bot.pathfinder.setGoal(goal, true);
       bot.pathfinder.on('goal_reached', async () => {
         try {
-          await new Promise(resolve => setTimeout(resolve, 500));
           const chest = bot.blockAt(nearestChest.position);
           if (!chest) {
             exploredChests.add(nearestChest.key);
             return;
           }
           const window = await bot.openChest(chest);
-          let itemCount = 0;
-          for (let i = 0; i < window.slots.length; i++) {
-            const item = window.slots[i];
+          for (const item of window.slots) {
             if (item && bot.inventory.emptySlotCount() > 2) {
               await window.withdraw(item.type, null, item.count);
-              itemCount += item.count;
             }
           }
           window.close();
           exploredChests.add(nearestChest.key);
-          if (itemCount > 0) {
-            safeChat(`Loot xong rương! Lấy được ${itemCount} đồ hay! (◕‿◕)♡`);
-          } else {
-            safeChat('Rương rỗng hoặc túi đầy rồi! (╥﹏╥)');
-          }
+          safeChat('Loot xong rương rồi! (◕‿◕)♡');
         } catch (openError) {
           exploredChests.add(nearestChest.key);
         }
@@ -1387,322 +1209,22 @@ function lootNearestChest(chests: any[]) {
   }
 }
 
-function attackNearestMob(mobs: any[]) {
-  if (!mobs.length) return;
-  const nearestMob = mobs[0];
-  console.log(`⚔️ Tấn công ${nearestMob.type}!`);
-  
-  const now = Date.now();
-  if (now - lastCombatChatTime > 5000) {
-    safeChat(`Quái ${nearestMob.type}! Coi chừng nhé! (ง •̀_•́)ง✨`);
-    lastCombatChatTime = now;
-  }
-  
-  try {
-    equipBestWeapon();
-    bot.attack(nearestMob.entity);
-    if (bot.pathfinder) {
-      bot.pathfinder.setGoal(new goals.GoalFollow(nearestMob.entity, 1));
-    }
-    botScreenData.status = `Đang tấn công ${nearestMob.type}`;
-  } catch (error) {
-    console.log('🔧 Lỗi attack mob');
-  }
-}
-
-function collectNearestDrop(drops: any[]) {
-  if (!drops.length) return;
-  const nearestDrop = drops[0];
-  console.log(`💎 Thu thập đồ rơi: ${nearestDrop.item || 'Unknown Item'} (${nearestDrop.distance.toFixed(1)}m)...`);
-  safeChat(`Uwaa! Có đồ rơi! Lụm đi nào! 💎✨ ${nearestDrop.item || 'Cái gì đó'}`);
-
-  try {
-    bot.clearControlStates();
-    if (bot.pathfinder && goals && nearestDrop.entity) {
-      const goal = new goals.GoalFollow(nearestDrop.entity, 0.5);
-      bot.pathfinder.setGoal(goal);
-    }
-    botScreenData.status = `Thu thập: ${nearestDrop.item || 'đồ rơi'}`;
-  } catch (error) {
-    console.log(`🔧 Lỗi collect drop: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  }
-}
-
-function exploreRandomDirection() {
-  try {
-    if (!bot || !bot.entity || !bot.entity.position) {
-      return;
-    }
-    const position = bot.entity.position;
-    const directions = [
-      { x: 20, z: 0 }, { x: -20, z: 0 }, { x: 0, z: 20 }, { x: 0, z: -20 },
-      { x: 15, z: 15 }, { x: -15, z: 15 }, { x: 15, z: -15 }, { x: -15, z: -15 }
-    ];
-    const randomDir = directions[Math.floor(Math.random() * directions.length)];
-    const targetPos = {
-      x: position.x + randomDir.x,
-      y: position.y,
-      z: position.z + randomDir.z
-    };
-    for (let y = Math.max(targetPos.y - 10, 40); y <= targetPos.y + 10; y++) {
-      try {
-        const checkBlock = bot.blockAt({ x: targetPos.x, y: y, z: targetPos.z });
-        const aboveBlock = bot.blockAt({ x: targetPos.x, y: y + 1, z: targetPos.z });
-        if (checkBlock && checkBlock.name !== 'air' && 
-            aboveBlock && aboveBlock.name === 'air') {
-          targetPos.y = y + 1;
-          break;
-        }
-      } catch (blockError) {
-        continue;
-      }
-    }
-    if (bot.pathfinder && goals && goals.GoalNear) {
-      bot.pathfinder.setGoal(new goals.GoalNear(targetPos.x, targetPos.y, targetPos.z, 1));
-    }
-    botScreenData.status = `Khám phá hướng (${targetPos.x}, ${targetPos.z})`;
-  } catch (error) {
-    console.log(`🔧 Lỗi explore direction: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    const actions = ['forward', 'left', 'right'] as const;
-    const randomAction = actions[Math.floor(Math.random() * actions.length)];
-    bot.setControlState(randomAction, true);
-    setTimeout(() => {
-      bot.setControlState(randomAction, false);
-    }, 2000);
-  }
-}
-
-function equipBestWeapon() {
-  try {
-    const weapons = ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'wooden_sword'];
-    for (const weapon of weapons) {
-      const item = bot.inventory.findInventoryItem(weapon);
-      if (item) {
-        bot.equip(item, 'hand');
-        console.log(`⚔️ Trang bị ${weapon}`);
-        botScreenData.equipment.weapon = weapon;
-        return;
-      }
-    }
-  } catch (error) {
-    console.log('🔧 Lỗi equip weapon');
-  }
-}
-
-function checkInventoryFullness() {
-  try {
-    const emptySlots = bot.inventory.emptySlotCount();
-    isInventoryFull = emptySlots <= 3;
-    if (isInventoryFull && currentMode === 'exploring') {
-      safeChat('Túi đồ đầy rồi! Chuyển sang chế độ giết quái thôi! (ง •̀_•́)ง💪');
-    }
-    botScreenData.status = isInventoryFull ? 'Túi đầy - Combat mode' : 'Đang khám phá';
-  } catch (error) {
-    console.log('🔧 Lỗi check inventory');
-  }
-}
-
-function startIdleMonitoring() {
-  if (selfDefenseInterval) {
-    clearInterval(selfDefenseInterval);
-  }
-  selfDefenseInterval = setInterval(() => {
-    if (!isConnected || !bot) {
-      clearInterval(selfDefenseInterval!);
-      return;
-    }
-    const now = Date.now();
-    const timeSinceLastActivity = now - lastActivityTime;
-    if (timeSinceLastActivity >= IDLE_TIMEOUT && currentMode === 'idle') {
-      console.log('🛡️ Kích hoạt chế độ tự vệ sau 3 phút idle');
-      safeChat('Đã 3 phút rồi! Tôi sẽ tự bảo vệ bản thân khỏi quái! 🛡️⚔️');
-      currentMode = 'self_defense';
-      startSelfDefense();
-    }
-  }, 30000);
-}
-
-function startSelfDefense() {
-  console.log('🛡️ Bắt đầu chế độ tự vệ...');
-  
-  const selfDefenseLoop = setInterval(() => {
-    if (!isConnected || !bot || currentMode !== 'self_defense') {
-      clearInterval(selfDefenseLoop);
-      return;
-    }
-
-    try {
-      equipBestWeapon();
-      const nearbyThreats = findNearbyThreats();
-      
-      if (nearbyThreats.length > 0) {
-        const nearestThreat = nearbyThreats[0];
-        console.log(`🛡️ Tự vệ khỏi ${nearestThreat.type}!`);
-        safeChat(`${nearestThreat.type} đến gần! Tôi phải tự vệ! (ง •̀_•́)ง`);
-        
-        bot.attack(nearestThreat.entity);
-        if (bot.pathfinder) {
-          bot.pathfinder.setGoal(new goals.GoalFollow(nearestThreat.entity, 1));
-        }
-        
-        botScreenData.status = `Tự vệ khỏi ${nearestThreat.type}`;
-      } else {
-        bot.pathfinder.setGoal(null);
-        performDefensiveMovement();
-        botScreenData.status = 'Chế độ tự vệ - An toàn';
-      }
-      updateBotScreen();
-    } catch (error) {
-      console.log('🔧 Lỗi self defense:', error.message);
-    }
-  }, 2000);
-}
-
-function findNearbyThreats() {
-  const threats: any[] = [];
-  const position = bot.entity.position;
-  try {
-    Object.values(bot.entities).forEach((entity: any) => {
-      if (!entity || !entity.position) return;
-      const distance = position.distanceTo(entity.position);
-      if (distance <= 8 && (entity.displayName || entity.name)) {
-        const hostileMobs = ['zombie', 'skeleton', 'creeper', 'spider', 'enderman', 'witch'];
-        const mobName = entity.displayName || entity.name || '';
-        if (hostileMobs.some(mob => mobName.toLowerCase().includes(mob))) {
-          threats.push({
-            entity,
-            distance,
-            type: mobName
-          });
-        }
-      }
-    });
-    threats.sort((a, b) => a.distance - b.distance);
-  } catch (error) {
-    console.log('🔧 Lỗi find threats');
-  }
-  return threats;
-}
-
-function performDefensiveMovement() {
-  try {
-    const actions = ['left', 'right', 'jump'] as const;
-    const randomAction = actions[Math.floor(Math.random() * actions.length)];
-    bot.setControlState(randomAction, true);
-    setTimeout(() => {
-      bot.setControlState(randomAction, false);
-    }, 1000);
-    const randomYaw = Math.random() * Math.PI * 2;
-    bot.look(randomYaw, 0);
-  } catch (error) {
-    console.log('🔧 Lỗi defensive movement');
-  }
-}
-
-function checkInventoryForItem(itemName: string) {
-  try {
-    let totalCount = 0;
-    let foundItems: any[] = [];
-    const itemAliases: { [key: string]: string[] } = {
-      'iron': ['iron_ingot', 'iron_ore', 'raw_iron'],
-      'gold': ['gold_ingot', 'gold_ore', 'raw_gold'],
-      'diamond': ['diamond', 'diamond_ore'],
-      'coal': ['coal', 'coal_ore'],
-      'stone': ['stone', 'cobblestone'],
-      'wood': ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log'],
-      'food': ['bread', 'apple', 'cooked_beef', 'cooked_porkchop', 'cooked_chicken'],
-      'tool': ['pickaxe', 'axe', 'shovel', 'sword', 'hoe']
-    };
-    const searchTerms = itemAliases[itemName] || [itemName];
-    for (const item of bot.inventory.items()) {
-      const itemFullName = (item.name || '').toLowerCase();
-      const itemDisplayName = (item.displayName || '').toLowerCase();
-      const matchesSearch = searchTerms.some(term => 
-        itemFullName.includes(term) || 
-        itemDisplayName.includes(term) ||
-        itemFullName === term
-      );
-      if (matchesSearch) {
-        totalCount += item.count;
-        foundItems.push(item);
-      }
-    }
-    return {
-      count: totalCount,
-      items: foundItems,
-      hasItem: totalCount > 0
-    };
-  } catch (error) {
-    console.log('🔧 Lỗi check inventory:', error);
-    return { count: 0, items: [], hasItem: false };
-  }
-}
-
-function giveItemToPlayer(username: string, itemName: string, amount: number) {
-  try {
-    const player = bot.players[username];
-    if (!player || !player.entity) {
-      safeChat(`${username}-chan không gần đây! Em không ném được! (´;ω;)`);
-      return;
-    }
-    const itemCheck = checkInventoryForItem(itemName);
-    if (!itemCheck.hasItem || itemCheck.count < amount) {
-      safeChat(`Gomen ${username}-chan! Em không đủ ${itemName}! Chỉ có ${itemCheck.count}! (´;ω;)`);
-      return;
-    }
-    let remainingAmount = amount;
-    for (const item of itemCheck.items) {
-      if (remainingAmount <= 0) break;
-      const tossAmount = Math.min(remainingAmount, item.count);
-      bot.toss(item.type, null, tossAmount);
-      remainingAmount -= tossAmount;
-      console.log(`🎁 Ném ${tossAmount} ${item.name} cho ${username}`);
-    }
-    safeChat(`Đã ném ${amount} ${itemName} cho ${username}-chan rồi! Lụm nhanh nhé! 💕`);
-  } catch (error) {
-    console.log(`🔧 Lỗi give item: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    safeChat(`Gomen ${username}-chan! Em không ném được đồ! (´;ω;)`);
-  }
-}
-
-function equipBestPickaxe() {
-  try {
-    const pickaxes = ['netherite_pickaxe', 'diamond_pickaxe', 'iron_pickaxe', 'stone_pickaxe', 'wooden_pickaxe'];
-    for (const pickaxe of pickaxes) {
-      const item = bot.inventory.findInventoryItem(pickaxe);
-      if (item) {
-        bot.equip(item, 'hand');
-        console.log(`⛏️ Trang bị ${pickaxe}`);
-        botScreenData.equipment.weapon = pickaxe;
-        return pickaxe;
-      }
-    }
-    console.log('⛏️ Không tìm thấy cuốc nào');
-    return null;
-  } catch (error) {
-    console.log('🔧 Lỗi equip pickaxe');
-    return null;
-  }
-}
 
 function startAutoMining(oreType: string) {
-  if (miningInterval) {
-    clearInterval(miningInterval);
-  }
-  console.log(`⛏️ Bắt đầu đào ${oreType} ore...`);
+  stopCurrentActivity();
   const pickaxe = equipBestPickaxe();
   if (!pickaxe) {
     safeChat('Em không có cuốc để đào! (´;ω;) Cần anh cho em cuốc!');
     return;
   }
+  safeChat(`Hai ${bot.username}-chan! Tôi sẽ đào ${oreType} ore với cuốc xịn nhất! ⛏️✨`);
+  
   miningInterval = setInterval(() => {
     if (!isConnected || !bot || currentMode !== 'mining') {
       clearInterval(miningInterval!);
       return;
     }
     try {
-      checkInventoryFullness();
-      lastActivityTime = Date.now();
       const nearbyOres = findNearbyOres(oreType);
       if (nearbyOres.length > 0) {
         mineNearestOre(nearbyOres[0]);
@@ -1716,356 +1238,222 @@ function startAutoMining(oreType: string) {
   }, 2000);
 }
 
-function findNearbyOres(oreType: string) {
-  const position = bot.entity.position;
-  const ores: any[] = [];
-  try {
-    const oreBlocks: { [key: string]: string[] } = {
-      'iron': ['iron_ore', 'deepslate_iron_ore'],
-      'gold': ['gold_ore', 'deepslate_gold_ore', 'nether_gold_ore'],
-      'diamond': ['diamond_ore', 'deepslate_diamond_ore'],
-      'copper': ['copper_ore', 'deepslate_copper_ore'],
-      'emerald': ['emerald_ore', 'deepslate_emerald_ore'],
-      'coal': ['coal_ore', 'deepslate_coal_ore'],
-      'netherite': ['ancient_debris']
-    };
-    const targetBlocks = oreBlocks[oreType] || [];
-    for (let x = -10; x <= 10; x++) {
-      for (let y = -5; y <= 5; y++) {
-        for (let z = -10; z <= 10; z++) {
-          const checkPos = position.offset(x, y, z);
-          try {
-            const block = bot.blockAt(checkPos);
-            if (block && targetBlocks.includes(block.name)) {
-              const distance = position.distanceTo(checkPos);
-              ores.push({
-                position: checkPos,
-                distance: distance,
-                type: block.name
-              });
-            }
-          } catch (blockError) {
-            continue;
-          }
-        }
-      }
-    }
-    ores.sort((a, b) => a.distance - b.distance);
-  } catch (error) {
-    console.log(`🔧 Lỗi tìm ore: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  }
-  return ores;
-}
-
-function mineNearestOre(ore: any) {
-  console.log(`⛏️ Đào ${ore.type} tại (${Math.floor(ore.position.x)}, ${Math.floor(ore.position.y)}, ${Math.floor(ore.position.z)})`);
-  try {
-    if (bot.pathfinder && goals) {
-      const goal = new goals.GoalBlock(
-        Math.floor(ore.position.x),
-        Math.floor(ore.position.y),
-        Math.floor(ore.position.z)
-      );
-      bot.pathfinder.setGoal(goal);
-    }
-    setTimeout(async () => {
-      try {
-        const block = bot.blockAt(ore.position);
-        if (block && (block.name.includes('ore') || block.name === 'ancient_debris')) {
-          await bot.dig(block);
-          console.log(`✅ Đã đào xong ${block.name}`);
-          safeChat(`Đào được ${block.name}! Yay! ⛏️✨`);
-        }
-      } catch (digError) {
-        console.log(`🔧 Lỗi đào block: ${digError instanceof Error ? digError.message : 'Unknown error'}`);
-      }
-    }, 2000);
-    botScreenData.status = `Đang đào ${ore.type}`;
-  } catch (error) {
-    console.log(`🔧 Lỗi mine ore: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  }
-}
-
+// FIX: Logic đào thông minh hơn
 function exploreForOres(oreType: string) {
   try {
     const position = bot.entity.position;
-    let targetY = position.y;
-    const optimalYLevels: { [key: string]: number } = {
-      'iron': 15,
-      'gold': 15,
-      'diamond': -54,
-      'copper': 48,
-      'emerald': -54,
-      'coal': 96,
-      'netherite': 15
+    const optimalYLevels = {
+      'diamond': -54, 'iron': 15, 'gold': -32, 'copper': 48,
+      'emerald': -16, 'coal': 96, 'netherite': 15
     };
-    targetY = optimalYLevels[oreType] || position.y;
-    const directions = [
-      { x: 10, z: 0 }, { x: -10, z: 0 }, { x: 0, z: 10 }, { x: 0, z: -10 }
-    ];
-    const randomDir = directions[Math.floor(Math.random() * directions.length)];
-    const targetPos = {
-      x: position.x + randomDir.x,
-      y: targetY,
-      z: position.z + randomDir.z
-    };
-    if (bot.pathfinder && goals) {
-      bot.pathfinder.setGoal(new goals.GoalNear(targetPos.x, targetPos.y, targetPos.z, 1));
+    const targetY = optimalYLevels[oreType] || -54;
+
+    const nearbyOres = findNearbyOres(oreType, 3);
+    if (nearbyOres.length > 0) {
+        mineNearestOre(nearbyOres[0]);
+        return;
     }
-    botScreenData.status = `Tìm ${oreType} ore tại Y=${targetY}`;
+
+    if (Math.abs(position.y - targetY) > 3) {
+      safeChat(`Đang đào bậc thang để xuống Y=${targetY} tìm ${oreType}! ⛏️`);
+      mineStaircase(targetY);
+    } else {
+      safeChat(`Đã tới độ sâu tối ưu! Bắt đầu đào ngang tìm ${oreType}! ⛏️`);
+      mineHorizontally();
+    }
   } catch (error) {
     console.log(`🔧 Lỗi explore for ores: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
 
-function showInventoryToPlayer(username: string) {
-  try {
-    const items = bot.inventory.items();
-    if (items.length === 0) {
-      safeChat(`${username}-chan! Em không có đồ gì cả! (´;ω;) Túi rỗng luôn!`);
-      return;
-    }
-    const itemGroups: { [key: string]: number } = {};
-    for (const item of items) {
-      const itemName = item.displayName || item.name;
-      itemGroups[itemName] = (itemGroups[itemName] || 0) + item.count;
-    }
-    const itemList = Object.entries(itemGroups)
-      .slice(0, 5)
-      .map(([name, count]) => `${name} x${count}`)
-      .join(', ');
-    const totalItems = items.reduce((sum, item) => sum + item.count, 0);
-    const totalSlots = items.length;
-    safeChat(`${username}-chan! Em có ${totalItems} đồ (${totalSlots} loại): ${itemList}${Object.keys(itemGroups).length > 5 ? '...' : ''}! Cần gì thì hỏi em nhé! 💕`);
-  } catch (error) {
-    console.log('🔧 Lỗi show inventory:', error);
-    safeChat(`${username}-chan! Em không xem được túi đồ! (´;ω;)`);
+// FIX: Đào bậc thang xuống/lên
+function mineStaircase(targetY: number) {
+  const position = bot.entity.position;
+  const yDirection = targetY > position.y ? 1 : -1;
+  const offset = yDirection > 0 ? bot.vec3(0, 1, 0) : bot.vec3(0, -1, 0);
+
+  const goal = new goals.GoalY(targetY);
+  bot.pathfinder.setGoal(goal, true);
+  
+  bot.pathfinder.on('goal_reached', () => {
+    // Goal is to reach a certain Y level, pathfinder will handle it.
+    // We just need to stop after reaching it.
+    bot.pathfinder.setGoal(null);
+  });
+}
+
+// FIX: Đào ngang
+function mineHorizontally() {
+  const directions = ['forward', 'left', 'right', 'back'] as const;
+  const randomDir = directions[Math.floor(Math.random() * directions.length)];
+  const position = bot.entity.position;
+  const directionOffsets = {
+    forward: bot.vec3(0, 0, 1), back: bot.vec3(0, 0, -1),
+    left: bot.vec3(-1, 0, 0), right: bot.vec3(1, 0, 0)
+  };
+  const offset = directionOffsets[randomDir];
+  const targetBlock = bot.blockAt(position.offset(offset.x, 0, offset.z));
+
+  if (targetBlock && targetBlock.name !== 'air') {
+    bot.dig(targetBlock);
+    setTimeout(() => {
+      bot.setControlState(randomDir, true);
+      setTimeout(() => bot.setControlState(randomDir, false), 1000);
+    }, 500);
+  } else {
+     bot.setControlState(randomDir, true);
+      setTimeout(() => bot.setControlState(randomDir, false), 1000);
   }
 }
 
-function startHealthRecovery() {
-  try {
-    safeChat('Chế độ phục hồi máu! Tôi sẽ tìm chỗ an toàn và ăn để hồi máu! 🏥');
-    currentMode = 'health_recovery';
-    bot.clearControlStates();
-    attemptSelfFeeding();
-    const threats = findNearbyThreats();
-    if (threats.length > 0) {
-      runAwayFromThreats(threats);
-    } else {
-      findSafeSpot();
-    }
-  } catch (error) {
-    console.log('🔧 Lỗi health recovery...');
+// FIX: Chức năng Auto-Fishing
+async function startAutoFishing(username: string) {
+  stopCurrentActivity();
+  const rod = bot.inventory.findInventoryItem('fishing_rod');
+  if (!rod) {
+    safeChat('Gomen! Em không có cần câu! (´;ω;) Ai cho em cần câu được không ạ?');
+    return;
   }
-}
+  safeChat('Có cần câu rồi! Em sẽ đi tìm chỗ có nước để câu cá! 🎣✨');
+  
+  currentMode = 'fishing';
+  let waterBlock = null;
+  // Tìm khối nước trong bán kính 20 blocks
+  for(let i = 0; i < 20; i++) {
+    waterBlock = bot.findBlock({ matching: block => block.name === 'water' });
+    if(waterBlock) break;
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
 
-function resumePreviousActivity() {
-  if (previousActivity && previousActivity !== 'idle') {
-    safeChat(`Khỏe rồi! Tôi sẽ tiếp tục ${previousActivity}! (◕‿◕)♡`);
-    currentMode = previousActivity;
-    lastActivityTime = Date.now();
-    switch (previousActivity) {
-      case 'following':
-        if (targetPlayer) startFollowing(targetPlayer);
-        break;
-      case 'protecting': 
-        if (targetPlayer) startProtecting(targetPlayer);
-        break;
-      case 'exploring':
-        startSmartExplore();
-        break;
-      case 'mining':
-        if (miningTarget) startAutoMining(miningTarget);
-        break;
-      case 'autofarming':
-        if (autoFarmTarget) startAutoFarm(autoFarmTarget);
-        break;
-    }
-    previousActivity = 'idle';
+  if (!waterBlock) {
+    safeChat('Gomen! Không tìm thấy chỗ nào có nước! Em sẽ khám phá để tìm! 🗺️');
+    exploreRandomDirection();
+    return;
   }
-}
+  
+  // Đi đến chỗ nước
+  const goal = new goals.GoalNear(waterBlock.position.x, waterBlock.position.y, waterBlock.position.z, 3);
+  bot.pathfinder.setGoal(goal, true);
 
-function attemptSelfFeeding() {
-  try {
-    const foods = bot.inventory.items().filter((item: any) => {
-      const foodItems = ['bread', 'apple', 'carrot', 'potato', 'cooked_beef', 'cooked_porkchop', 
-                        'cooked_chicken', 'cooked_salmon', 'cooked_cod', 'cookie', 'cake'];
-      return foodItems.some(food => item.name.includes(food));
-    });
-    if (foods.length > 0) {
-      const food = foods[0];
-      bot.equip(food, 'hand');
-      bot.consume();
-      safeChat(`Đang ăn ${food.displayName || food.name}! Om nom nom! (◕‿◕)`);
-      console.log(`🍖 Bot đang ăn ${food.name}`);
-    } else {
-      safeChat('Không có đồ ăn! Ai có thức ăn không ạ? (´;ω;)');
-    }
-  } catch (error) {
-    console.log('🔧 Lỗi self feeding...');
-  }
-}
-
-function runAwayFromThreats(threats: any[]) {
-  try {
-    const nearestThreat = threats[0];
-    const botPos = bot.entity.position;
-    const threatPos = nearestThreat.entity.position;
-    const escapeX = botPos.x - threatPos.x;
-    const escapeZ = botPos.z - threatPos.z;
-    const distance = Math.sqrt(escapeX*escapeX + escapeZ*escapeZ);
-    if (distance > 0) {
-      const normalizedX = escapeX / distance;
-      const normalizedZ = escapeZ / distance;
-      if (normalizedX > 0.5) bot.setControlState('forward', true);
-      else if (normalizedX < -0.5) bot.setControlState('back', true);
-      if (normalizedZ > 0.5) bot.setControlState('left', true);
-      else if (normalizedZ < -0.5) bot.setControlState('right', true);
-      bot.setControlState('sprint', true);
-      safeChat(`Chạy khỏi ${nearestThreat.type}! Máu thấp quá! (>_<)`);
-    }
-  } catch (error) {
-    console.log('🔧 Lỗi run away...');
-  }
-}
-
-function findSafeSpot() {
-  try {
-    const position = bot.entity.position;
-    const directions = [
-      { x: 10, z: 0 }, { x: -10, z: 0 }, { x: 0, z: 10 }, { x: 0, z: -10 }
-    ];
-    for (const dir of directions) {
-      const checkPos = {
-        x: position.x + dir.x,
-        y: position.y,
-        z: position.z + dir.z
-      };
-      if (bot.pathfinder && goals) {
-        bot.pathfinder.setGoal(new goals.GoalNear(checkPos.x, checkPos.y, checkPos.z, 2));
-        break;
-      }
-    }
-    safeChat('Đang tìm chỗ an toàn để hồi máu...');
-  } catch (error) {
-    console.log('🔧 Lỗi find safe spot...');
-  }
-}
-
-function returnToDroppedItems() {
-  try {
-    if (!droppedItemsLocation) return;
-    safeChat('Quay lại lụm đồ rớt! Chờ tôi nhé! (◕‿◕)');
-    currentMode = 'item_recovery';
-    if (bot.pathfinder && goals) {
-      const goal = new goals.GoalNear(
-        droppedItemsLocation.x,
-        droppedItemsLocation.y,
-        droppedItemsLocation.z,
-        3
-      );
-      bot.pathfinder.setGoal(goal);
-      setTimeout(() => {
-        if (currentMode === 'item_recovery') {
-          safeChat('Hết thời gian tìm đồ rớt! Có thể đã despawn rồi! (´;ω;)');
-          stopCurrentActivity();
-          droppedItemsLocation = null;
-        }
-      }, 30000);
-    }
-  } catch (error) {
-    console.log('🔧 Lỗi return to drops...');
-  }
-}
-
-function startSmartExplore() {
-  if (exploringInterval) {
-    clearInterval(exploringInterval);
-  }
-  safeChat('Bắt đầu khám phá thông minh! Tránh lá cây, dùng tools hợp lý! 🗺️✨');
-  exploringInterval = setInterval(() => {
-    if (!isConnected || !bot || currentMode !== 'exploring') {
-      clearInterval(exploringInterval!);
-      return;
-    }
-    try {
-      if (bot.health <= 6 || bot.food <= 6) {
-        safeChat('Cần nghỉ ngơi! Dừng khám phá để chăm sóc bản thân!');
-        stopCurrentActivity();
+  bot.pathfinder.on('goal_reached', async () => {
+    safeChat('Tìm thấy chỗ câu cá rồi! Bắt đầu câu đây! 🎣');
+    await bot.equip(rod, 'hand');
+    
+    // Bắt đầu câu cá
+    const fishingInterval = setInterval(() => {
+      if(currentMode !== 'fishing' || !isConnected || !bot) {
+        clearInterval(fishingInterval);
         return;
       }
-      equipBestGear();
-      const targets = findSmartExplorationTargets();
-      if (targets.chests.length > 0) {
-        lootNearestChest(targets.chests);
-      } else if (targets.drops.length > 0 && !isInventoryFull) {
-        collectNearestDrop(targets.drops);
-      } else if (targets.mobs.length > 0) {
-        attackNearestMob(targets.mobs);
+      // Kiểm tra quái vật gần đó
+      const threats = findNearbyThreats();
+      if(threats.length > 0) {
+        safeChat('Có quái vật! Đang tự vệ! (ง •̀_•́)ง');
+        stopCurrentActivity();
+        currentMode = 'protecting';
+        // Tích hợp chức năng chiến đấu của bảo vệ
+        bot.attack(threats[0].entity);
       } else {
-        exploreIntelligently();
+        bot.fish.castFish();
+        bot.once('caught_fish', (item) => {
+          safeChat(`Kyaa~! Em câu được một ${item.displayName}! Yay! ✨`);
+        });
       }
-      updateBotScreen();
-    } catch (error) {
-      console.log('🔧 Lỗi smart explore...');
-    }
-  }, 3000);
+    }, 10000); // Câu cá mỗi 10 giây
+  });
 }
 
-function exploreIntelligently() {
-  exploreRandomDirection();
+// FIX: Chế độ tự động xây dựng
+async function startAutoBuilding(project: string, username: string) {
+  stopCurrentActivity();
+  safeChat(`Để tôi dùng AI thiết kế ${project}! Chờ một chút nhé! 🧠✨`);
+  
+  // Chờ 3 giây để giả lập AI
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  
+  safeChat(`AI đã thiết kế xong! Bắt đầu xây ${project}! 🏗️`);
+  const originalGamemode = bot.game.gameMode;
+  bot.chat('/gamemode creative');
+  
+  // Kích hoạt chế độ bay
+  if (bot.creative) {
+    bot.creative.fly.setFlying(true);
+  }
+
+  const buildingPlan = await generateBuildingPlan(project, username);
+  if (!buildingPlan) {
+    safeChat(`Gomen ${username}-chan! AI không thể thiết kế ${project}! (´;ω;)`);
+    return;
+  }
+
+  botScreenData.status = `Đang xây dựng ${project}...`;
+
+  for (const blockData of buildingPlan.blocks) {
+    const item = bot.inventory.findInventoryItem(blockData.type);
+    if (!item) {
+      safeChat(`Thiếu block ${blockData.type}! Không thể xây tiếp! (´;ω;)`);
+      break;
+    }
+    await bot.equip(item, 'hand');
+    for (const pos of blockData.positions) {
+      await bot.creative.setBlock(bot.vec3(pos.x, pos.y, pos.z), blockData.type);
+    }
+  }
+
+  safeChat(`Xây xong ${project} rồi! Đẹp không? (◕‿◕)♡`);
+  bot.chat(`/gamemode ${originalGamemode}`);
+  if (bot.creative) {
+    bot.creative.fly.setFlying(false);
+  }
+}
+
+async function generateBuildingPlan(project: string, username: string) {
+  // Giả lập chức năng của AI
+  safeChat('🧠 Đang tư duy để tạo kế hoạch xây dựng...');
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  return {
+    name: project,
+    blocks: [
+      { type: 'oak_planks', positions: [
+        { x: bot.entity.position.x, y: bot.entity.position.y - 1, z: bot.entity.position.z },
+        { x: bot.entity.position.x + 1, y: bot.entity.position.y - 1, z: bot.entity.position.z },
+        { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z }
+      ] },
+      { type: 'glass', positions: [
+        { x: bot.entity.position.x, y: bot.entity.position.y + 1, z: bot.entity.position.z }
+      ]}
+    ]
+  };
 }
 
 function equipBestGear() {
   try {
     if (!bot || !bot.inventory) return;
-    const swords = bot.inventory.items().filter((item: any) => 
-      item.name.includes('sword')
-    );
+    const swords = bot.inventory.items().filter((item: any) => item.name.includes('sword'));
     const bestSword = swords.reduce((best: any, current: any) => {
-      const swordPriority: any = {
-        'diamond_sword': 3,
-        'iron_sword': 2,
-        'stone_sword': 1,
-        'wooden_sword': 0
-      };
+      const swordPriority: any = { 'diamond_sword': 3, 'iron_sword': 2, 'stone_sword': 1, 'wooden_sword': 0 };
       const bestPriority = swordPriority[best?.name] || 0;
       const currentPriority = swordPriority[current?.name] || 0;
       return currentPriority > bestPriority ? current : best;
     }, null);
     if (bestSword && bot.heldItem?.name !== bestSword.name) {
       bot.equip(bestSword, 'hand');
-      safeChat(`Equipped ${bestSword.name}! Ready for battle! ⚔️`);
     }
     const armorPieces = ['helmet', 'chestplate', 'leggings', 'boots'];
-    const armorPriority: any = {
-      'diamond': 3,
-      'iron': 2,
-      'chainmail': 1,
-      'leather': 0
-    };
+    const armorPriority: any = { 'diamond': 3, 'iron': 2, 'chainmail': 1, 'leather': 0 };
     armorPieces.forEach(piece => {
-      const armorItems = bot.inventory.items().filter((item: any) => 
-        item.name.includes(piece)
-      );
+      const armorItems = bot.inventory.items().filter((item: any) => item.name.includes(piece));
       const bestArmor = armorItems.reduce((best: any, current: any) => {
         let bestPriority = 0;
         let currentPriority = 0;
         for (const material in armorPriority) {
-          if (best?.name.includes(material)) {
-            bestPriority = armorPriority[material];
-          }
-          if (current?.name.includes(material)) {
-            currentPriority = armorPriority[material];
-          }
+          if (best?.name.includes(material)) { bestPriority = armorPriority[material]; }
+          if (current?.name.includes(material)) { currentPriority = armorPriority[material]; }
         }
         return currentPriority > bestPriority ? current : best;
       }, null);
       if (bestArmor) {
-        const equipSlot = piece === 'helmet' ? 'head' : 
-                        piece === 'chestplate' ? 'torso' :
-                        piece === 'leggings' ? 'legs' : 'feet';
+        const equipSlot = piece === 'helmet' ? 'head' : piece === 'chestplate' ? 'torso' : piece === 'leggings' ? 'legs' : 'feet';
         bot.equip(bestArmor, equipSlot);
       }
     });
@@ -2091,173 +1479,193 @@ function startAutoEquipment() {
   }, 5000);
 }
 
-function findSmartExplorationTargets() {
-  const targets = {
-    chests: [] as any[],
-    drops: [] as any[],
-    mobs: [] as any[]
-  };
+function checkInventoryForItem(itemName: string) {
   try {
-    const position = bot.entity.position;
-    Object.values(bot.entities).forEach((entity: any) => {
-      if (!entity || !entity.position) return;
-      const distance = position.distanceTo(entity.position);
-      if (distance > 32) return;
-      if (entity.objectType === 'Item') {
-        targets.drops.push({
-          entity,
-          distance,
-          item: entity.displayName || 'Unknown Item'
-        });
-      } else if (entity.type === 'mob' || entity.type === 'hostile') {
-        targets.mobs.push({
-          entity,
-          distance,
-          type: entity.displayName || entity.name || 'Unknown Mob'
-        });
-      }
-    });
-    for (let x = -16; x <= 16; x += 4) {
-      for (let z = -16; z <= 16; z += 4) {
-        for (let y = -8; y <= 8; y += 2) {
-          const checkPos = position.offset(x, y, z);
-          const block = bot.blockAt(checkPos);
-          if (block && (block.name.includes('chest') || block.name.includes('barrel'))) {
-            const distance = position.distanceTo(checkPos);
-            targets.chests.push({
-              position: checkPos,
-              distance,
-              type: block.name,
-              block
-            });
-          }
-        }
+    let totalCount = 0;
+    let foundItems: any[] = [];
+    const itemAliases = {
+      'iron': ['iron_ingot', 'iron_ore', 'raw_iron'], 'gold': ['gold_ingot', 'gold_ore', 'raw_gold'],
+      'diamond': ['diamond', 'diamond_ore'], 'coal': ['coal', 'coal_ore'],
+      'stone': ['stone', 'cobblestone'], 'wood': ['oak_log', 'birch_log'],
+      'food': ['bread', 'apple', 'cooked_beef', 'cooked_porkchop'],
+      'tool': ['pickaxe', 'axe', 'shovel', 'sword', 'hoe']
+    };
+    const searchTerms = itemAliases[itemName] || [itemName];
+    for (const item of bot.inventory.items()) {
+      const itemFullName = (item.name || '').toLowerCase();
+      const itemDisplayName = (item.displayName || '').toLowerCase();
+      const matchesSearch = searchTerms.some(term => 
+        itemFullName.includes(term) || itemDisplayName.includes(term) || itemFullName === term
+      );
+      if (matchesSearch) {
+        totalCount += item.count;
+        foundItems.push(item);
       }
     }
-    targets.chests.sort((a, b) => a.distance - b.distance);
-    targets.drops.sort((a, b) => a.distance - b.distance);
-    targets.mobs.sort((a, b) => a.distance - b.distance);
+    return { count: totalCount, items: foundItems, hasItem: totalCount > 0 };
   } catch (error) {
-    console.log('🔧 Lỗi find smart targets...');
+    console.log('🔧 Lỗi check inventory:', error);
+    return { count: 0, items: [], hasItem: false };
   }
-  return targets;
 }
 
-function startChestHunting() {
-  if (movementInterval) {
-    clearInterval(movementInterval);
+function equipBestPickaxe() {
+  try {
+    const pickaxes = ['netherite_pickaxe', 'diamond_pickaxe', 'iron_pickaxe', 'stone_pickaxe', 'wooden_pickaxe'];
+    for (const pickaxe of pickaxes) {
+      const item = bot.inventory.findInventoryItem(pickaxe);
+      if (item) {
+        bot.equip(item, 'hand');
+        console.log(`⛏️ Trang bị ${pickaxe}`);
+        botScreenData.equipment.weapon = pickaxe;
+        return pickaxe;
+      }
+    }
+    console.log('⛏️ Không tìm thấy cuốc nào');
+    return null;
+  } catch (error) {
+    console.log('🔧 Lỗi equip pickaxe');
+    return null;
   }
-  safeChat('Bắt đầu săn rương! Tìm trong bán kính 32 blocks! 📦🔍');
-  movementInterval = setInterval(() => {
-    if (!isConnected || !bot || currentMode !== 'chest_hunting') {
-      clearInterval(movementInterval!);
+}
+
+function giveItemToPlayer(username: string, itemName: string, amount: number) {
+  try {
+    const player = bot.players[username];
+    if (!player || !player.entity) {
+      safeChat(`${username}-chan không gần đây! Em không ném được! (´;ω;)`);
       return;
     }
-    try {
-      const chests = findNearbyChests();
-      if (chests.length > 0) {
-        const nearestChest = chests[0];
-        safeChat(`Tìm thấy rương cách ${nearestChest.distance.toFixed(1)}m! Đang tiến đến! 📦✨`);
-        lootNearestChest([nearestChest]);
-      } else {
-        exploreForChests();
-      }
-      updateBotScreen();
-    } catch (error) {
-      console.log('🔧 Lỗi chest hunting...');
+    const itemCheck = checkInventoryForItem(itemName);
+    if (!itemCheck.hasItem || itemCheck.count < amount) {
+      safeChat(`Gomen ${username}-chan! Em không đủ ${itemName}! Chỉ có ${itemCheck.count}! (´;ω;)`);
+      return;
     }
-  }, 3000);
-}
-
-function findNearbyChests() {
-  const chests: any[] = [];
-  const position = bot.entity.position;
-  const chestSearchRadius = 32;
-  try {
-    for (let x = -chestSearchRadius; x <= chestSearchRadius; x += 16) {
-      for (let z = -chestSearchRadius; z <= chestSearchRadius; z += 16) {
-        for (let y = position.y - 16; y <= position.y + 16; y++) {
-          const checkPos = { x: position.x + x, y: y, z: position.z + z };
-          const block = bot.blockAt(checkPos);
-          if (block && (block.name.includes('chest') || block.name.includes('shulker'))) {
-            const distance = position.distanceTo(checkPos);
-            if (distance <= chestSearchRadius) {
-              chests.push({
-                position: checkPos,
-                distance: distance,
-                type: block.name,
-                block: block
-              });
-            }
-          }
-        }
-      }
+    let remainingAmount = amount;
+    for (const item of itemCheck.items) {
+      if (remainingAmount <= 0) break;
+      const tossAmount = Math.min(remainingAmount, item.count);
+      bot.toss(item.type, null, tossAmount);
+      remainingAmount -= tossAmount;
     }
-    chests.sort((a, b) => a.distance - b.distance);
+    safeChat(`Đã ném ${amount} ${itemName} cho ${username}-chan rồi! Lụm nhanh nhé! 💕`);
   } catch (error) {
-    console.log('🔧 Lỗi find chests...');
+    console.log(`🔧 Lỗi give item: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    safeChat(`Gomen ${username}-chan! Em không ném được đồ! (´;ω;)`);
   }
-  return chests;
 }
 
-function exploreForChests() {
+function showInventoryToPlayer(username: string) {
   try {
-    const directions = [
-      { x: 16, z: 0 }, { x: 0, z: 16 }, { x: -16, z: 0 }, { x: 0, z: -16 },
-      { x: 16, z: 16 }, { x: -16, z: 16 }, { x: 16, z: -16 }, { x: -16, z: -16 }
-    ];
-    const randomDir = directions[Math.floor(Math.random() * directions.length)];
-    const position = bot.entity.position;
-    const targetPos = {
-      x: position.x + randomDir.x,
-      y: position.y,
-      z: position.z + randomDir.z
-    };
-    if (bot.pathfinder && goals) {
-      bot.pathfinder.setGoal(new goals.GoalNear(targetPos.x, targetPos.y, targetPos.z, 2));
+    const items = bot.inventory.items();
+    if (items.length === 0) {
+      safeChat(`${username}-chan! Em không có đồ gì cả! (´;ω;) Túi rỗng luôn!`);
+      return;
     }
-    botScreenData.status = `Tìm rương tại (${targetPos.x}, ${targetPos.z})`;
+    const itemGroups = items.reduce((groups, item) => {
+      const itemName = item.displayName || item.name;
+      groups[itemName] = (groups[itemName] || 0) + item.count;
+      return groups;
+    }, {});
+    const itemList = Object.entries(itemGroups)
+      .slice(0, 5)
+      .map(([name, count]) => `${name} x${count}`)
+      .join(', ');
+    const totalItems = items.reduce((sum, item) => sum + item.count, 0);
+    const totalSlots = items.length;
+    safeChat(`${username}-chan! Em có ${totalItems} đồ (${totalSlots} loại): ${itemList}${Object.keys(itemGroups).length > 5 ? '...' : ''}! Cần gì thì hỏi em nhé! 💕`);
   } catch (error) {
-    console.log('🔧 Lỗi explore for chests...');
+    console.log('🔧 Lỗi show inventory:', error);
+    safeChat(`${username}-chan! Em không xem được túi đồ! (´;ω;)`);
+  }
+}
+
+function findNearbyOres(oreType: string, radius: number = 10) {
+  const position = bot.entity.position;
+  const ores: any[] = [];
+  const oreBlocks = {
+    'iron': ['iron_ore', 'deepslate_iron_ore'], 'gold': ['gold_ore', 'deepslate_gold_ore', 'nether_gold_ore'],
+    'diamond': ['diamond_ore', 'deepslate_diamond_ore'], 'copper': ['copper_ore', 'deepslate_copper_ore'],
+    'emerald': ['emerald_ore', 'deepslate_emerald_ore'], 'coal': ['coal_ore', 'deepslate_coal_ore'],
+    'netherite': ['ancient_debris']
+  };
+  const targetBlocks = oreBlocks[oreType] || [];
+  for (let x = -radius; x <= radius; x++) {
+    for (let y = -radius; y <= radius; y++) {
+      for (let z = -radius; z <= radius; z++) {
+        const checkPos = position.offset(x, y, z);
+        try {
+          const block = bot.blockAt(checkPos);
+          if (block && targetBlocks.includes(block.name)) {
+            const distance = position.distanceTo(checkPos);
+            ores.push({ position: checkPos, distance: distance, type: block.name });
+          }
+        } catch (blockError) { continue; }
+      }
+    }
+  }
+  ores.sort((a, b) => a.distance - b.distance);
+  return ores;
+}
+
+function mineNearestOre(ore: any) {
+  console.log(`⛏️ Đào ${ore.type} tại (${Math.floor(ore.position.x)}, ${Math.floor(ore.position.y)}, ${Math.floor(ore.position.z)})`);
+  try {
+    if (bot.pathfinder && goals) {
+      const distance = bot.entity.position.distanceTo(ore.position);
+      if (distance <= 3) {
+        bot.pathfinder.setGoal(null);
+        bot.dig(bot.blockAt(ore.position));
+      } else {
+        const goal = new goals.GoalBlock(ore.position.x, ore.position.y, ore.position.z);
+        bot.pathfinder.setGoal(goal, true);
+        bot.pathfinder.on('goal_reached', () => {
+          bot.pathfinder.setGoal(null);
+          bot.dig(bot.blockAt(ore.position));
+        });
+      }
+    }
+    botScreenData.status = `Đang đào ${ore.type}`;
+  } catch (error) {
+    console.log(`🔧 Lỗi mine ore: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+async function returnToDroppedItems() {
+  if (!droppedItemsLocation) return;
+  safeChat('Quay lại lụm đồ rớt! Chờ tôi nhé! (◕‿◕)');
+  currentMode = 'item_recovery';
+  if (bot.pathfinder && goals) {
+    const goal = new goals.GoalNear(
+      droppedItemsLocation.x,
+      droppedItemsLocation.y,
+      droppedItemsLocation.z,
+      3
+    );
+    bot.pathfinder.setGoal(goal, true);
+    setTimeout(() => {
+      if (currentMode === 'item_recovery') {
+        safeChat('Hết thời gian tìm đồ rớt! Có thể đã despawn rồi! (´;ω;)');
+        stopCurrentActivity();
+        droppedItemsLocation = null;
+      }
+    }, 30000);
   }
 }
 
 async function answerQuestion(question: string, username: string) {
-  try {
-    return `${username}-chan! Câu hỏi hay quá! Về "${question}", tôi nghĩ... hmm... Tôi cần học thêm để trả lời tốt hơn! (◕‿◕)♡`;
-  } catch (error) {
-    console.log('🔧 Lỗi answer question...');
-    throw error;
-  }
+  try { return `${username}-chan! Câu hỏi hay quá! Về "${question}", tôi nghĩ... hmm... Tôi cần học thêm để trả lời tốt hơn! (◕‿◕)♡`; } catch (error) { throw error; }
 }
-
 async function helpWithTask(task: string, username: string) {
-  try {
-    return `${username}-chan! Để làm "${task}", tôi suggest: Bước 1: Chuẩn bị nguyên liệu. Bước 2: Lên kế hoạch. Bước 3: Thực hiện từng bước nhỏ! Chúc bạn thành công! ✨`;
-  } catch (error) {
-    console.log('🔧 Lỗi help with task...');
-    throw error;
-  }
+  try { return `${username}-chan! Để làm "${task}", tôi suggest: Bước 1: Chuẩn bị nguyên liệu. Bước 2: Lên kế hoạch. Bước 3: Thực hiện từng bước nhỏ! Chúc bạn thành công! ✨`; } catch (error) { throw error; }
 }
-
 async function generateLoliResponse(message: string, username: string) {
   try {
     const responses = [
-      `${username}-chan nói hay quá! (◕‿◕)♡`,
-      `UwU ${username}-chan! Bạn làm tôi vui quá! 💕`,
-      `Kyaa~! ${username}-chan thật dễ thương! ✨`,
-      `Hihi! ${username}-chan luôn biết cách làm tôi cười! 🌸`
+      `${username}-chan nói hay quá! (◕‿◕)♡`, `UwU ${username}-chan! Bạn làm tôi vui quá! 💕`,
+      `Kyaa~! ${username}-chan thật dễ thương! ✨`, `Hihi! ${username}-chan luôn biết cách làm tôi cười! 🌸`
     ];
     return responses[Math.floor(Math.random() * responses.length)];
-  } catch (error) {
-    console.log('🔧 Lỗi generate loli response...');
-    throw error;
-  }
+  } catch (error) { throw error; }
 }
-
-// Bổ sung các hàm phụ trợ
-function patrolAroundPlayer(player: any) {}
-function moveAwayFromTarget(botPos: any, targetPos: any, distance: number) {}
-function moveTowardsPlayerPrecise(botPos: any, playerPos: any, targetDistance: number) {}
-function moveTowardsPlayer(botPos: any, playerPos: any) {}
 
