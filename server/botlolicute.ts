@@ -1,9 +1,7 @@
 // ==================== Cấu hình và Imports ====================
-import * as mineflayer from 'mineflayer';
-import { pathfinder, Movements } from 'mineflayer-pathfinder';
-// @ts-ignore
-import * as goals from 'mineflayer-pathfinder/lib/goals';
-import { answerQuestion, helpWithTask, generateLoliResponse } from './gemini';
+import mineflayer from 'mineflayer';
+import * as pathfinderPlugin from 'mineflayer-pathfinder';
+const { pathfinder, Movements, goals } = pathfinderPlugin;
 
 // Type declarations for global
 declare global {
@@ -104,7 +102,7 @@ let botScreenData = {
   health: 20,
   food: 20,
   targetPlayer: null,
-  nearbyMobs: [],
+  nearbyMobs: [] as any[],
   equipment: {
     weapon: null,
     armor: []
@@ -124,6 +122,7 @@ let originalGameMode = 'survival';
 let isFlying = false;
 
 let defaultMovements: Movements;
+let creeperAvoidanceMode = false;
 
 
 // ==================== Khởi động và Cleanup ====================
@@ -413,7 +412,7 @@ function checkForThreats() {
     botScreenData.nearbyMobs = nearbyEntities.map((entity: any) => ({
       name: entity.name || entity.displayName || 'Unknown',
       distance: entity.position.distanceTo(bot.entity.position).toFixed(1)
-    })) as any[];
+    }));
 
     if (nearbyEntities.length > 0) {
       const threat = nearbyEntities[0] as any;
@@ -1644,7 +1643,7 @@ function showInventoryToPlayer(username: string) {
       safeChat(`${username}-chan! Em không có đồ gì cả! (´;ω;) Túi rỗng luôn!`);
       return;
     }
-    const itemGroups = items.reduce((groups, item) => {
+    const itemGroups = items.reduce((groups: Record<string, number>, item: any) => {
       const itemName = item.displayName || item.name;
       groups[itemName] = (groups[itemName] || 0) + item.count;
       return groups;
@@ -1653,7 +1652,7 @@ function showInventoryToPlayer(username: string) {
       .slice(0, 5)
       .map(([name, count]) => `${name} x${count}`)
       .join(', ');
-    const totalItems = items.reduce((sum, item) => sum + item.count, 0);
+    const totalItems = items.reduce((sum: number, item: any) => sum + item.count, 0);
     const totalSlots = items.length;
     safeChat(`${username}-chan! Em có ${totalItems} đồ (${totalSlots} loại): ${itemList}${Object.keys(itemGroups).length > 5 ? '...' : ''}! Cần gì thì hỏi em nhé! 💕`);
   } catch (error) {
@@ -1665,7 +1664,7 @@ function showInventoryToPlayer(username: string) {
 function findNearbyOres(oreType: string, radius: number = 10) {
   const position = bot.entity.position;
   const ores: any[] = [];
-  const oreBlocks = {
+  const oreBlocks: Record<string, string[]> = {
     'iron': ['iron_ore', 'deepslate_iron_ore'], 'gold': ['gold_ore', 'deepslate_gold_ore', 'nether_gold_ore'],
     'diamond': ['diamond_ore', 'deepslate_diamond_ore'], 'copper': ['copper_ore', 'deepslate_copper_ore'],
     'emerald': ['emerald_ore', 'deepslate_emerald_ore'], 'coal': ['coal_ore', 'deepslate_coal_ore'],
@@ -1749,5 +1748,83 @@ async function generateLoliResponse(message: string, username: string) {
     ];
     return responses[Math.floor(Math.random() * responses.length)];
   } catch (error) { throw error; }
+}
+
+// ==================== Missing Functions ====================
+function exploreRandomDirection() {
+  if (!bot || !bot.pathfinder) return;
+  try {
+    const randomX = bot.entity.position.x + (Math.random() - 0.5) * 20;
+    const randomZ = bot.entity.position.z + (Math.random() - 0.5) * 20;
+    const goal = new goals.GoalXZ(randomX, randomZ);
+    bot.pathfinder.setGoal(goal, true);
+    botScreenData.status = 'Đang khám phá ngẫu nhiên';
+  } catch (error) {
+    console.log('🔧 Lỗi explore random direction:', error);
+  }
+}
+
+function startChestHunting() {
+  safeChat('Bắt đầu săn chest! ✨ Tìm kho báu nào! 💎');
+  currentMode = 'chest_hunting';
+  botScreenData.status = 'Đang săn chest';
+  updateBotScreen();
+}
+
+function collectNearestDrop() {
+  if (!bot) return;
+  try {
+    const drops = Object.values(bot.entities).filter((entity: any) => 
+      entity && entity.name === 'item' && entity.position &&
+      entity.position.distanceTo(bot.entity.position) <= 10
+    );
+    
+    if (drops.length > 0) {
+      const nearest = drops.reduce((closest: any, current: any) => {
+        const closestDist = closest.position.distanceTo(bot.entity.position);
+        const currentDist = current.position.distanceTo(bot.entity.position);
+        return currentDist < closestDist ? current : closest;
+      }) as any;
+      
+      const goal = new goals.GoalBlock(nearest.position.x, nearest.position.y, nearest.position.z);
+      bot.pathfinder.setGoal(goal, true);
+      botScreenData.status = 'Đang thu thập vật phẩm rơi';
+    }
+  } catch (error) {
+    console.log('🔧 Lỗi collect nearest drop:', error);
+  }
+}
+
+function attackNearestMob() {
+  if (!bot) return;
+  try {
+    const mobs = Object.values(bot.entities).filter((entity: any) => 
+      entity && entity.type === 'mob' && entity.position &&
+      entity.position.distanceTo(bot.entity.position) <= 10 &&
+      ['zombie', 'skeleton', 'creeper', 'spider'].includes(entity.name?.toLowerCase() || '')
+    );
+    
+    if (mobs.length > 0) {
+      const nearest = mobs.reduce((closest: any, current: any) => {
+        const closestDist = closest.position.distanceTo(bot.entity.position);
+        const currentDist = current.position.distanceTo(bot.entity.position);
+        return currentDist < closestDist ? current : closest;
+      }) as any;
+      
+      bot.attack(nearest);
+      botScreenData.status = `Đang tấn công ${nearest.name}`;
+    }
+  } catch (error) {
+    console.log('🔧 Lỗi attack nearest mob:', error);
+  }
+}
+
+function findNearbyThreats() {
+  if (!bot) return [];
+  return Object.values(bot.entities).filter((entity: any) => 
+    entity && entity.type === 'mob' && entity.position &&
+    entity.position.distanceTo(bot.entity.position) <= 15 &&
+    ['zombie', 'skeleton', 'creeper', 'spider', 'enderman'].includes(entity.name?.toLowerCase() || '')
+  );
 }
 
