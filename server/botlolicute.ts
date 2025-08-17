@@ -2,21 +2,16 @@ import mineflayer, { Bot } from 'mineflayer'
 import { pathfinder, Movements } from 'mineflayer-pathfinder'
 import * as net from 'net'
 
-// Dynamic import for goals
-let goals: any = null
-const initGoals = async () => {
-  if (!goals) {
-    const pathfinderModule = await import('mineflayer-pathfinder')
-    goals = pathfinderModule.goals
-  }
-  return goals
-}
+// Import goals using createRequire for CommonJS module
+import { createRequire } from 'module'
+const require = createRequire(import.meta.url)
+const { goals } = require('mineflayer-pathfinder')
 // import autoEat from 'mineflayer-auto-eat'
 import { plugin as pvp } from 'mineflayer-pvp'
 import { plugin as collectBlock } from 'mineflayer-collectblock'
 import { Vec3 } from 'vec3'
 
-const apiKey = "" // Gemini AI key
+const apiKey = "AIzaSyB8gZxjT6hFiOCeNS7ZNzVG-M_bDZ_CVNk" // Gemini AI key
 
 // Bot configuration
 const BOT_CONFIG = {
@@ -37,6 +32,9 @@ let autoFarmActive = false
 let autoFishingActive = false
 let isFollowing = false
 let isProtecting = false
+let autoChestHuntActive = false
+let fishingActive = false
+let lootedChests: Set<string> = new Set() // Ghi nhớ rương đã loot
 let reconnectAttempts = 0
 const MAX_RECONNECT_ATTEMPTS = 5
 
@@ -204,6 +202,38 @@ async function createBot() {
     }
   }
 
+  function equipBestTool() {
+    try {
+      const tools = ['pickaxe', 'axe', 'shovel', 'hoe']
+      let bestTool = null
+      let highestTier = 0
+      
+      for (const item of bot.inventory.items()) {
+        for (const toolType of tools) {
+          if (item.name.includes(toolType)) {
+            let tier = 0
+            if (item.name.includes('diamond')) tier = 4
+            else if (item.name.includes('iron')) tier = 3  
+            else if (item.name.includes('stone')) tier = 2
+            else if (item.name.includes('wooden')) tier = 1
+            
+            if (tier > highestTier) {
+              highestTier = tier
+              bestTool = item
+            }
+          }
+        }
+      }
+      
+      if (bestTool) {
+        bot.equip(bestTool, 'hand').catch(() => {})
+        console.log(`⚒️ Bot đã trang bị ${bestTool.name}`)
+      }
+    } catch (error) {
+      console.log('Lỗi trang bị tool:', error)
+    }
+  }
+
   function equipOffhand() {
     try {
       const totem = bot.inventory.items().find(item => item.name === 'totem_of_undying')
@@ -250,36 +280,65 @@ async function createBot() {
     }, 2000)
   }
 
-  // ------------------ Flirting / Chat AI ------------------
+  // ------------------ Random Cute Chat / Flirting ------------------
   function startFlirting() {
     setInterval(async () => {
-      if (!apiKey) return
+      if (Math.random() < 0.4) { // 40% chance mỗi 20s
+        if (apiKey) {
+          // Dùng AI để tạo câu thả thính
+          const prompts = [
+            "Tạo câu thả thính cute cho bot Minecraft tên Loli. Ngắn dưới 60 ký tự. Xưng tớ, gọi cậu.",
+            "Bot Loli nói câu ngọt ngào với người chơi. Dưới 60 ký tự, có emoji, xưng tớ gọi cậu.",
+            "Loli bot muốn thả thính cute. Tạo câu ngắn dưới 60 ký tự, đáng yêu, xưng tớ gọi cậu."
+          ]
+          
+          try {
+            const randomPrompt = prompts[Math.floor(Math.random() * prompts.length)]
+            const payload = {
+              contents: [{ parts: [{ text: randomPrompt }] }]
+            }
 
-      const prompt = "Bạn là bot AI dễ thương Minecraft tên botlolicute, gửi tin nhắn thả thính ngọt ngào, xưng 'tớ', gọi 'cậu', dùng emoji."
-      
-      try {
-        const payload = {
-          contents: [{ role: "user", parts: [{ text: prompt }] }]
+            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            })
+
+            const result = await response.json()
+            const text = result?.candidates?.[0]?.content?.parts?.[0]?.text
+
+            if (text) {
+              bot.chat(text.substring(0, 70))
+            } else {
+              throw new Error('No AI response')
+            }
+          } catch (error) {
+            // Fallback messages nếu AI không hoạt động
+            const fallbackMessages = [
+              "Cậu có nhớ tớ không? 💕",
+              "Tớ đang nghĩ về cậu đó! 😊",
+              "Cậu đẹp trai quá! 😘", 
+              "Tớ thích chơi với cậu! 💖",
+              "Cậu có thương tớ không? 🥺",
+              "Tớ muốn ở bên cậu mãi! 💕",
+              "Cậu làm tớ tim đập nhanh! 💓"
+            ]
+            const randomMessage = fallbackMessages[Math.floor(Math.random() * fallbackMessages.length)]
+            bot.chat(randomMessage)
+          }
+        } else {
+          // Không có API key thì dùng messages có sẵn
+          const simpleMessages = [
+            "Cậu có nhớ tớ không? 💕",
+            "Tớ thích chơi với cậu! 💖",
+            "Cậu đẹp trai quá! 😘",
+            "Tớ sẽ bảo vệ cậu! 🛡️"
+          ]
+          const randomMessage = simpleMessages[Math.floor(Math.random() * simpleMessages.length)]
+          bot.chat(randomMessage)
         }
-
-        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`
-        
-        const response = await fetch(apiUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        })
-
-        const result = await response.json()
-        const text = result?.candidates?.[0]?.content?.parts?.[0]?.text
-
-        if (text) {
-          bot.chat(text.substring(0, 100)) // Limit message length
-        }
-      } catch (error) {
-        console.error('Lỗi thả thính:', error)
       }
-    }, 30000) // 30 giây một lần
+    }, 20000) // 20 giây một lần
   }
 
   // ------------------ Chat Commands ------------------
@@ -304,17 +363,35 @@ async function createBot() {
       goSleep()
     } else if (cleanMessage.startsWith('cần')) {
       giveItemToPlayer(username, cleanMessage)
-    } else if (cleanMessage.startsWith('auto mine')) {
-      const oreName = cleanMessage.split(' ')[2]
-      if (oreName) startAutoMine(oreName)
-    } else if (cleanMessage.includes('tìm rương')) {
-      lootNearbyChest()
-    } else if (cleanMessage.includes('auto farm all')) {
+    } else if (cleanMessage.startsWith('auto mine') || cleanMessage.includes('đào')) {
+      if (cleanMessage.includes('diamond')) {
+        startAutoMine('diamond_ore')
+      } else if (cleanMessage.includes('iron')) {
+        startAutoMine('iron_ore') 
+      } else if (cleanMessage.includes('coal')) {
+        startAutoMine('coal_ore')
+      } else if (cleanMessage.includes('gold')) {
+        startAutoMine('gold_ore')
+      } else {
+        startAutoMine('diamond_ore') // default
+      }
+    } else if (cleanMessage.includes('rương') || cleanMessage.includes('chest')) {
+      smartChestHunt()
+    } else if (cleanMessage.includes('cất đồ')) {
+      storeItemsInChest()
+    } else if (cleanMessage.includes('dừng câu cá')) {
+      stopFishing()
+    } else if (cleanMessage.includes('auto farm all') || cleanMessage.includes('farm')) {
       startAutoFarmAll()
-    } else if (cleanMessage.includes('auto câu')) {
+    } else if (cleanMessage.includes('câu') || cleanMessage.includes('fish')) {
       startFishing()
     } else if (cleanMessage.includes('botlolicute') || cleanMessage.startsWith('bot ơi')) {
       handleChatWithAI(username, cleanMessage)
+    } else {
+      // Random AI chat response
+      if (Math.random() < 0.6) { // 60% chance để phản hồi
+        handleChatWithAI(username, cleanMessage)
+      }
     }
   })
 
@@ -327,13 +404,19 @@ async function createBot() {
 
     try {
       const prompt = message.replace('botlolicute', '').replace('bot ơi', '').trim()
-      const systemPrompt = `Bạn là bot AI dễ thương tên botlolicute trong Minecraft. Trả lời ngọt ngão, xưng "tớ", gọi "cậu". Chỉ trả lời trực tiếp không cần dẫn nhập.`
+      const cutePrompts = [
+        `Tớ là Loli bot cute trong Minecraft. ${username} nói: "${prompt}". Trả lời ngắn dưới 80 ký tự, đáng yêu, hơi thả thính. Xưng tớ, gọi cậu.`,
+        `Tớ là bot AI tên Loli, đang chơi với ${username}. Phản hồi "${prompt}" theo kiểu cute girl, ngắn gọn, có emoji. Dùng tớ/cậu.`,
+        `Tớ là Loli bot đáng yêu. ${username}: "${prompt}". Trả lời ngọt ngào, hơi flirt, dưới 80 ký tự. Xưng tớ gọi cậu.`
+      ]
+      
+      const systemPrompt = cutePrompts[Math.floor(Math.random() * cutePrompts.length)]
 
       const payload = {
-        contents: [{ role: "user", parts: [{ text: `${systemPrompt}\n\n${prompt}` }] }]
+        contents: [{ parts: [{ text: systemPrompt }] }]
       }
 
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`
 
       const response = await fetch(apiUrl, {
         method: 'POST',
@@ -345,12 +428,24 @@ async function createBot() {
       const generatedText = result?.candidates?.[0]?.content?.parts?.[0]?.text
 
       if (generatedText) {
-        bot.chat(generatedText.substring(0, 100))
+        bot.chat(generatedText.substring(0, 80))
       } else {
-        bot.chat(`Tớ xin lỗi, tớ đang bận, cậu thử lại sau nhé! 😥`)
+        const fallbackResponses = [
+          `Hmm... tớ đang nghĩ về cậu đó! 💕`,
+          `Cậu nói gì vậy? Tớ hơi mơ màng nè! 😊`,
+          `Ôi tớ đang bận... nhưng luôn có time cho cậu! 😘`
+        ]
+        const randomFallback = fallbackResponses[Math.floor(Math.random() * fallbackResponses.length)]
+        bot.chat(randomFallback)
       }
     } catch (error) {
-      bot.chat(`Ôi, tớ không hiểu lắm. Cậu có thể nói lại không? 😥`)
+      const errorResponses = [
+        `Ôi, tớ hơi rối... cậu nói lại không? 🥺`,
+        `Tớ không nghe rõ, cậu thương tớ thì nói lại! 💕`,
+        `Hmm? Tớ đang mơ về cậu nè! 😊`
+      ]
+      const randomError = errorResponses[Math.floor(Math.random() * errorResponses.length)]
+      bot.chat(randomError)
       console.error('Lỗi chat AI:', error)
     }
   }
@@ -383,16 +478,70 @@ async function createBot() {
       const targetPos = targetPlayer.position
       const distance = bot.entity.position.distanceTo(targetPos)
 
+      // Kiểm tra boat logic chỉ khi player gần
+      const botInBoat = bot.vehicle !== null
+      
+      if (distance <= 10) {
+        // Kiểm tra xem player có ngồi thuyền không
+        const playerInBoat = targetPlayer.vehicle !== null
+        
+        if (playerInBoat && !botInBoat) {
+          // Player ngồi thuyền, bot chưa ngồi -> tìm thuyền để ngồi
+          const availableBoat = Object.values(bot.entities).find((entity: any) => 
+            entity.name === 'boat' && 
+            entity.position && 
+            entity.position.distanceTo(bot.entity.position) < 8 && 
+            (!entity.passengers || entity.passengers.length === 0)
+          )
+          
+          if (availableBoat) {
+            try {
+              bot.chat('🚤 Tớ cũng ngồi thuyền theo cậu!')
+              await bot.mount(availableBoat as any)
+            } catch (error) {
+              console.log('Lỗi ngồi thuyền:', error)
+            }
+          }
+        } else if (!playerInBoat && botInBoat) {
+          // Player không ngồi thuyền, bot đang ngồi -> xuống thuyền
+          try {
+            bot.chat('🚶‍♀️ Cậu xuống thuyền rồi, tớ cũng xuống!')
+            bot.dismount()
+          } catch (error) {
+            console.log('Lỗi xuống thuyền:', error)
+          }
+        }
+      }
+
       // Nếu quá xa thì teleport
       if (distance > 15) {
-        const g = await initGoals()
-        bot.pathfinder.setGoal(new g.GoalBlock(targetPos.x, targetPos.y, targetPos.z))
+        try {
+          bot.chat(`/tp ${targetPlayer.username}`)
+        } catch (e) {
+          // Nếu không thể tp, thì đào đường và bơi
+          bot.pathfinder.setGoal(new goals.GoalBlock(targetPos.x, targetPos.y, targetPos.z))
+          
+          // Cho phép đập mọi khối cản
+          const movements = new Movements(bot)
+          movements.canDig = true
+          movements.allow1by1towers = true
+          movements.allowParkour = false
+          movements.allowSprinting = true
+          movements.allowEntityDetection = true
+          
+          // Cho phép lặn
+          movements.allowFreeMotion = true
+          movements.canOpenDoors = true
+          
+          bot.pathfinder.setMovements(movements)
+        }
         return
       }
 
-      // Giữ khoảng cách 2 block
-      const g = await initGoals()
-      bot.pathfinder.setGoal(new g.GoalFollow(targetPlayer, 2), true)
+      // Giữ khoảng cách 2 block  
+      if (!botInBoat) {
+        bot.pathfinder.setGoal(new goals.GoalFollow(targetPlayer, 2), true)
+      }
     }, 200)
   }
 
@@ -432,24 +581,71 @@ async function createBot() {
       const targetPos = targetPlayer.position
       const distance = bot.entity.position.distanceTo(targetPos)
 
-      // Tìm mob gần để tấn công
+      // Kiểm tra máu và ăn thức ăn nếu cần
+      const health = bot.health
+      const food = bot.food
+      
+      if (health < 15 || food < 15) { // Máu dưới 15 hoặc đói
+        const foodItems = bot.inventory.items().filter(item => 
+          item.name.includes('bread') || 
+          item.name.includes('apple') || 
+          item.name.includes('meat') ||
+          item.name.includes('fish') ||
+          item.name.includes('potato') ||
+          item.name.includes('carrot')
+        )
+        
+        if (foodItems.length > 0) {
+          try {
+            await bot.equip(foodItems[0], 'hand')
+            bot.consume()
+            bot.chat('🍞 Tớ ăn thức ăn để hồi máu rồi đánh tiếp!')
+            await new Promise(resolve => setTimeout(resolve, 1000))
+          } catch (error) {
+            console.log('Lỗi ăn thức ăn:', error)
+          }
+        }
+      }
+
+      // Tìm mob gần để tấn công (chỉ trong phạm vi 7 block)
       const mob = bot.nearestEntity((entity: any) => {
-        const isHostile = entity.type === 'mob' && entity.displayName !== 'Enderman'
-        const isVindicator = entity.name === 'vindicator'
-        const isPillager = entity.name === 'pillager'
-        return (isHostile || isVindicator || isPillager) && 
-               bot.entity.position.distanceTo(entity.position) < 10
+        if (!entity || !entity.position) return false
+        
+        const distance = bot.entity.position.distanceTo(entity.position)
+        if (distance >= 7) return false
+        
+        // Các loại mob cần tấn công
+        const hostileMobs = ['zombie', 'skeleton', 'creeper', 'spider', 'witch', 'pillager', 'vindicator', 'evoker', 'husk', 'stray', 'phantom', 'drowned']
+        const mobName = entity.name ? entity.name.toLowerCase() : ''
+        const displayName = entity.displayName ? entity.displayName.toLowerCase() : ''
+        
+        // Kiểm tra theo tên hoặc displayName
+        const isHostile = hostileMobs.some(mobType => 
+          mobName.includes(mobType) || displayName.includes(mobType)
+        )
+        
+        // Hoặc kiểm tra theo type và loại trừ các mob thân thiện
+        const isMobType = entity.type === 'mob' && 
+                         !mobName.includes('villager') && 
+                         !mobName.includes('iron_golem') && 
+                         !displayName.includes('enderman')
+        
+        return isHostile || isMobType
       })
 
-      if (mob) {
+      // Nếu cách xa player quá 9 block thì ưu tiên đi theo player
+      if (distance > 9) {
+        bot.pvp.stop()
+        bot.pathfinder.setGoal(new goals.GoalFollow(targetPlayer, 2), true)
+      } else if (mob && distance <= 9 && health > 10) { // Chỉ đánh khi máu đủ
         equipBestWeapon()
         bot.setControlState('sprint', true)
         bot.pvp.attack(mob)
+        console.log(`⚔️ Đang tấn công ${mob.name || mob.displayName} cách ${Math.round(bot.entity.position.distanceTo(mob.position))} blocks`)
       } else {
         bot.pvp.stop()
         if (distance > 6) {
-          const g = await initGoals()
-      bot.pathfinder.setGoal(new g.GoalFollow(targetPlayer, 2), true)
+          bot.pathfinder.setGoal(new goals.GoalFollow(targetPlayer, 2), true)
         }
       }
     }, 200)
@@ -472,7 +668,13 @@ async function createBot() {
     autoMineActive = false
     autoFarmActive = false
     autoFishingActive = false
-    bot.chat(`🛑 Được rồi, tớ dừng lại đây!`)
+    autoChestHuntActive = false
+    fishingActive = false
+    
+    bot.pathfinder.setGoal(null)
+    bot.pvp.stop()
+    
+    bot.chat(`🛑 Được rồi cậu, tớ dừng tất cả hoạt động đây! 💕`)
     console.log('⏹️ Dừng tất cả hoạt động')
   }
 
@@ -555,45 +757,181 @@ async function createBot() {
       }
 
       try {
+        // Chỉ trang bị tool nếu chưa có hoặc không phù hợp
+        const currentItem = bot.heldItem
+        if (!currentItem || !currentItem.name.includes('pickaxe')) {
+          equipBestTool()
+        }
+        
         const ore = bot.findBlock({
-          matching: (block: any) => block.name === oreName,
-          maxDistance: 32
+          matching: (block: any) => block.name.includes(oreName),
+          maxDistance: 64
         })
 
         if (ore) {
-          bot.pathfinder.setGoal(new goals.GoalBlock(ore.position.x, ore.position.y, ore.position.z))
-          bot.dig(ore).catch(() => {})
+          console.log(`⛏️ Tìm thấy ${oreName} tại ${ore.position}`)
+          
+          // Kiểm tra khoảng cách đến ore
+          const distance = bot.entity.position.distanceTo(ore.position)
+          
+          if (distance > 4.5) {
+            // Thiết lập movements để di chuyển
+            const movements = new Movements(bot)
+            movements.canDig = true
+            movements.allow1by1towers = true
+            movements.allowParkour = true
+            movements.allowSprinting = true
+            bot.pathfinder.setMovements(movements)
+            
+            // Di chuyển đến ore
+            bot.pathfinder.setGoal(new goals.GoalBlock(ore.position.x, ore.position.y, ore.position.z))
+            
+            // Đợi di chuyển xong
+            await new Promise(resolve => setTimeout(resolve, 3000))
+          }
+          
+          // Dừng pathfinder trước khi đào
+          bot.pathfinder.setGoal(null)
+          
+          // Đợi một chút để đảm bảo pathfinder đã dừng
+          await new Promise(resolve => setTimeout(resolve, 500))
+          
+          try {
+            // Kiểm tra lại khoảng cách trước khi đào
+            const finalDistance = bot.entity.position.distanceTo(ore.position)
+            if (finalDistance <= 4.5) {
+              await bot.dig(ore)
+              bot.chat(`✅ Đã đào xong ${oreName}`)
+            } else {
+              console.log(`❌ Quá xa để đào ${oreName} (khoảng cách: ${finalDistance.toFixed(2)})`)
+            }
+          } catch (digError) {
+            console.log('Lỗi đào:', digError)
+          }
+        } else {
+          console.log(`🔍 Không tìm thấy ${oreName} trong phạm vi 128 block`)
         }
       } catch (error) {
         console.log('Lỗi auto mine:', error)
       }
-    }, 500)
+    }, 5000) // Tăng interval để tránh spam
   }
 
-  // ------------------ Loot Chest ------------------
-  async function lootNearbyChest() {
+  // ------------------ Simple Chest Hunt ------------------
+  async function smartChestHunt() {
     try {
+      stopAll()
+      autoChestHuntActive = false // Tạm thời disable
+      bot.chat('🗃️ Tính năng tìm rương đang được cải tiến, thử lại sau nhé! 💕')
+      
+    } catch (error) {
+      bot.chat('🥺 Có lỗi khi tìm rương...')
+      console.log('Lỗi chest hunt:', error)
+      autoChestHuntActive = false
+    }
+  }
+  
+  // Simple chest finding (will be improved later)
+  async function findSingleChest() {
+    try {
+      bot.chat('🔍 Tìm rương đơn giản...')
+      // Basic implementation without recursion
+      const chestBlock = bot.findBlocks({
+        matching: ['chest', 'barrel', 'ender_chest'],
+        maxDistance: 32,
+        count: 1
+      })
+
+      if (chestBlock.length > 0) {
+        bot.chat(`📦 Tìm thấy rương gần nhất!`)
+        // Simple navigation without complex logic
+        const goal = new goals.GoalNear(chestBlock[0].x, chestBlock[0].y, chestBlock[0].z, 2)
+        bot.pathfinder.setGoal(goal)
+      } else {
+        bot.chat('🥺 Không tìm thấy rương gần đây')
+      }
+    } catch (error) {
+      bot.chat('🛑 Lỗi tìm rương')
+      console.log('Lỗi find chest:', error)
+    }
+  }
+  
+  function stopChestHunt() {
+    autoChestHuntActive = false
+    bot.chat('🛑 Tớ dừng tìm rương rồi!')
+  }
+  
+  // ------------------ Cất đồ vào rương ------------------
+  async function storeItemsInChest() {
+    try {
+      bot.chat('📦 Tớ sẽ cất đồ vào rương gần nhất nhé!')
+      
+      // Tìm rương gần nhất
       const chestBlock = bot.findBlock({
-        matching: (block: any) => block.name.includes('chest'),
+        matching: (block: any) => {
+          return block.name.includes('chest') || 
+                 block.name.includes('barrel') ||
+                 block.name.includes('shulker')
+        },
         maxDistance: 32
       })
 
       if (!chestBlock) {
-        bot.chat('🥺 Không thấy rương')
+        bot.chat('🥺 Tớ không tìm thấy rương nào gần để cất đồ...')
         return
       }
 
+      // Di chuyển đến rương
+      const goal = new goals.GoalNear(chestBlock.position.x, chestBlock.position.y, chestBlock.position.z, 1)
+      bot.pathfinder.setGoal(goal)
+      
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Timeout'))
+        }, 15000)
+        
+        const checkDistance = setInterval(async () => {
+          const distance = bot.entity.position.distanceTo(chestBlock.position)
+          
+          if (distance <= 1.5) {
+            clearInterval(checkDistance)
+            clearTimeout(timeout)
+            resolve(true)
+          }
+        }, 500)
+      })
+
+      // Mở rương và cất đồ
+      await bot.lookAt(chestBlock.position, true)
       const chest = await bot.openChest(chestBlock)
-      for (const slot of chest.containerItems()) {
-        if (slot) {
-          await chest.withdraw(slot.type, null, slot.count)
+      
+      let storedCount = 0
+      const itemsToKeep = ['sword', 'pickaxe', 'axe', 'shovel', 'hoe', 'helmet', 'chestplate', 'leggings', 'boots', 'bread', 'apple', 'meat', 'fish', 'potato', 'carrot', 'golden_apple', 'shield', 'bow', 'crossbow', 'fishing_rod']
+      
+      for (const item of bot.inventory.items()) {
+        // Kiểm tra xem có phải đồ cần giữ không
+        const shouldKeep = itemsToKeep.some(keepItem => 
+          item.name.toLowerCase().includes(keepItem) || 
+          item.displayName?.toLowerCase().includes(keepItem)
+        )
+        
+        if (!shouldKeep) {
+          try {
+            await chest.deposit(item.type, null, item.count)
+            storedCount++
+            await new Promise(resolve => setTimeout(resolve, 100))
+          } catch (error) {
+            console.log('Lỗi cất đồ:', error)
+          }
         }
       }
+      
       chest.close()
-      bot.chat('📦 Đã loot xong rương')
+      bot.chat(`✅ Đã cất ${storedCount} vật phẩm vào rương! Giữ lại đồ quan trọng cho cậu 💕`)
+      
     } catch (error) {
-      bot.chat('🛑 Không thể mở rương')
-      console.log('Lỗi loot chest:', error)
+      bot.chat('🥺 Có lỗi khi cất đồ...')
+      console.log('Lỗi store items:', error)
     }
   }
 
@@ -625,51 +963,108 @@ async function createBot() {
     }, 200)
   }
 
-  // ------------------ Auto Fishing ------------------
+  // ------------------ Auto Fishing Fixed ------------------
   async function startFishing() {
     try {
+      stopAll()
+      fishingActive = true
       autoFishingActive = true
-      bot.chat('🎣 Bắt đầu câu cá')
+      bot.chat('🎣 Tớ bắt đầu câu cá cho cậu nhé! 💕')
       
       const rod = bot.inventory.items().find(i => i.name.includes('fishing_rod'))
       if (!rod) {
-        bot.chat('🥺 Không có cần câu')
+        bot.chat('🥺 Tớ không có cần câu... cậu có thể cho tớ cần câu không?')
+        fishingActive = false
         autoFishingActive = false
         return
       }
 
+      // Tìm nước và di chuyển đến vị trí tốt
       const water = bot.findBlock({
-        matching: (block: any) => block.name.includes('water'),
+        matching: (block: any) => block.name === 'water',
         maxDistance: 32
       })
       
       if (!water) {
-        bot.chat('🥺 Không tìm thấy nước')
+        bot.chat('🥺 Tớ không tìm thấy nước gần đây...')
+        fishingActive = false
         autoFishingActive = false
         return
       }
 
+      // Di chuyển đến cạnh nước
+      const goal = new goals.GoalNear(water.position.x, water.position.y + 1, water.position.z, 2)
+      bot.pathfinder.setGoal(goal)
+      await new Promise(resolve => setTimeout(resolve, 3000))
+      bot.pathfinder.setGoal(null)
+
+      // Trang bị cần câu và đảm bảo không đổi
       await bot.equip(rod, 'hand')
-      bot.lookAt(water.position, true)
-
-      const fishInterval = setInterval(async () => {
-        if (!autoFishingActive) {
-          clearInterval(fishInterval)
-          return
-        }
-
-        try {
-          await bot.fish()
-          bot.chat('🎣 Nhặt được cá/tài nguyên')
-        } catch (e) {
-          console.log('🛑 Lỗi câu cá:', e)
-        }
-      }, 5000)
+      
+      // Bắt đầu câu cá liên tục
+      await continuousFishing(water)
+      
     } catch (error) {
-      bot.chat('🛑 Không thể câu cá')
+      bot.chat('🥺 Có lỗi khi câu cá...')
       console.log('Lỗi fishing:', error)
+      fishingActive = false
+      autoFishingActive = false
     }
   }
+  
+  async function continuousFishing(water: any) {
+    while (fishingActive && autoFishingActive) {
+      try {
+        // Đảm bảo vẫn cầm cần câu
+        const currentItem = bot.heldItem
+        if (!currentItem || !currentItem.name.includes('fishing_rod')) {
+          const rod = bot.inventory.items().find(i => i.name.includes('fishing_rod'))
+          if (rod) {
+            await bot.equip(rod, 'hand')
+          } else {
+            bot.chat('🥺 Mất cần câu rồi...')
+            fishingActive = false
+            return
+          }
+        }
+        
+        // Nhìn về phía nước
+        await bot.lookAt(water.position)
+        await new Promise(resolve => setTimeout(resolve, 500))
+        
+        console.log('🎣 Thả câu...')
+        
+        // Sử dụng bot.fish() và chờ kết quả
+        try {
+          const caughtItem = await bot.fish()
+          if (caughtItem) {
+            const itemName = caughtItem.displayName || caughtItem.name || 'cá'
+            bot.chat(`🐟 Tớ câu được ${itemName}! Cậu thấy tớ giỏi không? 💕`)
+            console.log(`🎣 Câu được: ${itemName}`)
+          }
+        } catch (fishError) {
+          console.log('Lỗi khi câu:', fishError)
+        }
+        
+        // Nghỉ trước khi câu tiếp
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        
+      } catch (error) {
+        if (fishingActive) {
+          console.log('Lỗi trong chu trình câu cá:', error)
+          await new Promise(resolve => setTimeout(resolve, 3000))
+        }
+      }
+    }
+  }
+  
+  function stopFishing() {
+    fishingActive = false
+    autoFishingActive = false
+    bot.chat('🛑 Tớ dừng câu cá rồi! 💕')
+  }
+
+
 
   // Error handling
   bot.on('error', (err: any) => {
